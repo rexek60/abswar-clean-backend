@@ -2,14 +2,30 @@ import express from "express";
 import cors from "cors";
 import pg from "pg";
 import dotenv from "dotenv";
+import http from "http";
+import { Server } from "socket.io";
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const server = http.createServer(app);
 
 const PORT = process.env.PORT || 8080;
+const FRONTEND_URL = process.env.FRONTEND_URL || "*";
+
+app.use(cors({
+  origin: FRONTEND_URL === "*" ? "*" : FRONTEND_URL,
+  credentials: true
+}));
+
+app.use(express.json());
+
+const io = new Server(server, {
+  cors: {
+    origin: FRONTEND_URL === "*" ? "*" : FRONTEND_URL,
+    credentials: true
+  }
+});
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -30,6 +46,8 @@ const seedCountries = [
   ["AT","Austria","🇦🇹"],["BE","Belgium","🇧🇪"],["IE","Ireland","🇮🇪"],["CZ","Czechia","🇨🇿"],["HU","Hungary","🇭🇺"],
   ["RO","Romania","🇷🇴"],["BG","Bulgaria","🇧🇬"],["RS","Serbia","🇷🇸"],["HR","Croatia","🇭🇷"],["PK","Pakistan","🇵🇰"]
 ];
+
+let onlinePlayers = 0;
 
 async function initDb() {
   await pool.query(`
@@ -99,29 +117,34 @@ async function initDb() {
   );
 }
 
+async function getGameState() {
+  const countries = await pool.query("SELECT * FROM countries ORDER BY hp DESC, name ASC");
+  const war = await pool.query("SELECT * FROM war_state WHERE id='global'");
+  const recentAttacks = await pool.query("SELECT * FROM attacks ORDER BY created_at DESC LIMIT 20");
+
+  return {
+    countries: countries.rows,
+    war: war.rows[0],
+    recentAttacks: recentAttacks.rows,
+    onlinePlayers
+  };
+}
+
 app.get("/", (_req, res) => {
-  res.json({ name: "ABSWAR Persistent Backend", status: "online" });
+  res.json({ name: "ABSWAR Realtime Backend", status: "online" });
 });
 
 app.get("/health", async (_req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ ok: true, postgres: true, persistent: true });
+    res.json({ ok: true, postgres: true, realtime: true, onlinePlayers });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 app.get("/api/game/state", async (_req, res) => {
-  const countries = await pool.query("SELECT * FROM countries ORDER BY hp DESC, name ASC");
-  const war = await pool.query("SELECT * FROM war_state WHERE id='global'");
-  const recentAttacks = await pool.query("SELECT * FROM attacks ORDER BY created_at DESC LIMIT 20");
-
-  res.json({
-    countries: countries.rows,
-    war: war.rows[0],
-    recentAttacks: recentAttacks.rows
-  });
+  res.json(await getGameState());
 });
 
 app.post("/api/player/connect", async (req, res) => {
@@ -156,6 +179,7 @@ app.post("/api/player/choose-country", async (req, res) => {
   );
 
   const player = await pool.query("SELECT * FROM players WHERE wallet=$1", [wallet]);
+  io.emit("player:country", { wallet, countryCode });
   res.json({ ok: true, player: player.rows[0] });
 });
 
@@ -212,8 +236,10 @@ app.post("/api/game/attack", async (req, res) => {
       [wallet]
     );
 
-    await client.query(
-      "INSERT INTO attacks (attacker_wallet, from_country, target_country, damage) VALUES ($1,$2,$3,$4)",
+    const attackInsert = await client.query(
+      `INSERT INTO attacks (attacker_wallet, from_country, target_country, damage)
+       VALUES ($1,$2,$3,$4)
+       RETURNING *`,
       [wallet, own.code, target.code, damage]
     );
 
@@ -231,13 +257,20 @@ app.post("/api/game/attack", async (req, res) => {
 
     await client.query("COMMIT");
 
-    res.json({
+    const payload = {
       ok: true,
+      attack: attackInsert.rows[0],
       from_country: own.code,
       target_country: target.code,
       target_hp: newTargetHp,
-      eliminated
-    });
+      eliminated,
+      countries_left: countriesLeft.rows[0].count
+    };
+
+    io.emit("war:attack", payload);
+    io.emit("war:state", await getGameState());
+
+    res.json(payload);
   } catch (err) {
     await client.query("ROLLBACK");
     res.status(400).json({ error: err.message });
@@ -251,12 +284,27 @@ app.post("/api/admin/reset", async (_req, res) => {
   await pool.query("DELETE FROM attacks");
   await pool.query("UPDATE players SET bullets=100, contribution=0, country_code=NULL, updated_at=NOW()");
   await pool.query("UPDATE war_state SET total_attacks=0, countries_left=50, final_phase=false, updated_at=NOW() WHERE id='global'");
+  const state = await getGameState();
+  io.emit("war:state", state);
   res.json({ ok: true, message: "Game reset complete" });
+});
+
+io.on("connection", async (socket) => {
+  onlinePlayers++;
+  io.emit("players:online", { onlinePlayers });
+
+  socket.emit("connected", { ok: true, message: "ABSWAR realtime connected" });
+  socket.emit("war:state", await getGameState());
+
+  socket.on("disconnect", () => {
+    onlinePlayers = Math.max(0, onlinePlayers - 1);
+    io.emit("players:online", { onlinePlayers });
+  });
 });
 
 initDb()
   .then(() => {
-    app.listen(PORT, () => console.log("ABSWAR persistent backend running on port " + PORT));
+    server.listen(PORT, () => console.log("ABSWAR realtime backend running on port " + PORT));
   })
   .catch((err) => {
     console.error("INIT ERROR:", err);

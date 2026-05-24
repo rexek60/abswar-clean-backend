@@ -1,18 +1,12 @@
-# ABSWAR PostgreSQL Persistent Backend
+# ABSWAR Realtime Backend
 
-Bu sürüm Railway PostgreSQL'e kalıcı kayıt yapar.
+Railway backend with:
+- PostgreSQL persistence
+- Socket.IO realtime attack events
+- live countries state
+- attack feed
+- online player counter
 
-## Gerekli Railway Variable
-
+Required Railway variables:
 - DATABASE_URL
-
-Railway PostgreSQL bağlıysa otomatik gelir.
-
-## Endpointler
-
-- GET /health
-- GET /api/game/state
-- POST /api/player/connect
-- POST /api/player/choose-country
-- POST /api/game/attack
-- POST /api/admin/reset
+- FRONTEND_URL

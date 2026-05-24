@@ -1,6 +1,6 @@
 {
-  "name": "abswar-no-token-beta-backend",
-  "version": "3.0.0",
+  "name": "abswar-alliance-beta-backend",
+  "version": "4.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": { "start": "node server.js" },

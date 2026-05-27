@@ -149,6 +149,104 @@ const cooldowns = new Map();
 const alliances = new Map();
 const allianceFeed = [];
 
+// ── TUR / OYUN DÖNGÜSÜ ─────────────────────────
+const ROUND_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 gün
+let roundNumber = 1;
+let roundStartTime = Date.now();
+let roundEndTime = roundStartTime + ROUND_DURATION_MS;
+let roundStatus = 'active'; // active | ended | claiming
+let lastRoundResult = null;  // { roundNumber, winners:[{rank,country,share,topPlayer}], endedAt, totalPool }
+
+function timeRemainingMs() {
+  return Math.max(0, roundEndTime - Date.now());
+}
+
+function getLeaderboard() {
+  return [...countries]
+    .filter(c => !c.eliminated)
+    .sort((a,b) => (b.hp||0) - (a.hp||0));
+}
+
+function getTopPlayerOfCountry(countryCode) {
+  let top = null;
+  for (const p of players.values()) {
+    if (p.country_code === countryCode) {
+      if (!top || (p.contribution||0) > (top.contribution||0)) top = p;
+    }
+  }
+  return top;
+}
+
+function computeRoundResult() {
+  // Önce eliminasyon kontrolü — bir tek ülke kaldıysa veya hepsi gitti
+  const alive = countries.filter(c => !c.eliminated);
+  let winners;
+
+  if (alive.length === 1) {
+    // Mutlak galip
+    const sorted = getLeaderboard();
+    winners = sorted.slice(0,3);
+  } else {
+    // Süre doldu — en yüksek HP'li 3 ülke
+    winners = getLeaderboard().slice(0,3);
+  }
+
+  // %60 / %25 / %15
+  const shares = [60, 25, 15];
+  return winners.map((c, i) => ({
+    rank: i+1,
+    country: c.code,
+    countryName: c.name,
+    flag: c.flag,
+    hp: c.hp,
+    sharePct: shares[i] || 0,
+    topPlayer: getTopPlayerOfCountry(c.code)?.wallet || null,
+    topPlayerContribution: getTopPlayerOfCountry(c.code)?.contribution || 0
+  }));
+}
+
+function endRound() {
+  if (roundStatus !== 'active') return;
+  roundStatus = 'ended';
+  const winners = computeRoundResult();
+  lastRoundResult = {
+    roundNumber,
+    endedAt: Date.now(),
+    winners,
+    note: 'Ödüller admin onayı bekliyor (smart contract payReward).'
+  };
+  io.emit('round:ended', lastRoundResult);
+  console.log(`[ROUND ${roundNumber}] BİTTİ — Kazananlar:`, winners.map(w=>`${w.flag} ${w.country} (${w.sharePct}%)`).join(' | '));
+}
+
+function startNewRound() {
+  roundNumber++;
+  roundStartTime = Date.now();
+  roundEndTime = roundStartTime + ROUND_DURATION_MS;
+  roundStatus = 'active';
+  // Ülkeleri sıfırla
+  countries.forEach(c => { c.hp = 1000; c.max_hp = 1000; c.eliminated = false; });
+  // Saldırı geçmişi & ittifak feed temizle (oyuncular ve mermileri korunur)
+  recentAttacks.length = 0;
+  cooldowns.clear();
+  allianceFeed.length = 0;
+  // İttifak skorlarını sıfırla
+  alliances.forEach(a => { a.score = 0; });
+  io.emit('round:started', { roundNumber, roundStartTime, roundEndTime });
+  emitState();
+  console.log(`[ROUND ${roundNumber}] BAŞLADI`);
+}
+
+// Her dakika kontrol et — tur süresi doldu mu?
+setInterval(() => {
+  if (roundStatus === 'active') {
+    const alive = countries.filter(c => !c.eliminated);
+    if (Date.now() >= roundEndTime || alive.length <= 1) {
+      endRound();
+    }
+  }
+}, 60 * 1000);
+
 // ── KÖTÜYE KULLANIM KORUMASI ─────────────────────
 const rateLimits = new Map(); // wallet -> { count, windowStart }
 const RATE_LIMIT_WINDOW = 10000; // 10 saniye
@@ -226,6 +324,14 @@ function state() {
     leaderboard,
     alliances: allianceList,
     allianceFeed,
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      startTime: roundStartTime,
+      endTime: roundEndTime,
+      remainingMs: timeRemainingMs(),
+      lastResult: lastRoundResult
+    },
     war:{
       total_attacks: recentAttacks.length,
       countries_left: countries.filter(c=>!c.eliminated).length,
@@ -373,6 +479,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   }
   cooldowns.set(player.wallet, now);
 
+  if (roundStatus !== 'active') return res.status(400).json({ error:"Tur aktif değil — yeni tur bekleniyor" });
   if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
   if (player.bullets <= 0) return res.status(400).json({ error:"Mermin yok! Pazardan mermi al." });
 
@@ -395,7 +502,15 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
     alliance.score += 1;
   }
 
-  if (target.hp <= 0) target.eliminated = true;
+  if (target.hp <= 0 && !target.eliminated) {
+    target.eliminated = true;
+    io.emit("country:eliminated", { country: target.code });
+    // Tek ülke kaldı mı?
+    const alive = countries.filter(c => !c.eliminated);
+    if (alive.length <= 1 && roundStatus === 'active') {
+      endRound();
+    }
+  }
 
   const attack = {
     from_country: own.code,
@@ -433,6 +548,55 @@ app.post("/api/admin/reset", (req,res)=>{
   allianceFeed.length=0;
   emitState();
   res.json({ ok:true, message:"ABSWAR alliance beta reset complete" });
+});
+
+// ── ADMIN: TUR YÖNETİMİ ─────────────────────────
+function checkAdmin(req) {
+  const token = req.headers['x-admin-token'] || (req.body && req.body.token);
+  return token === ADMIN_TOKEN;
+}
+
+// Tur durumu — herkes görebilir
+app.get("/api/round/status", (_req,res) => {
+  res.json({
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      startTime: roundStartTime,
+      endTime: roundEndTime,
+      remainingMs: timeRemainingMs(),
+      lastResult: lastRoundResult
+    }
+  });
+});
+
+// Admin: kazanan listesini gör (ödeme yapmadan önce kontrol)
+app.get("/api/admin/round/winners", (req,res) => {
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (roundStatus === 'active') {
+    return res.json({
+      preview: true,
+      message: "Tur henüz aktif — bunlar şu anki sıralama (kazanan adayları)",
+      winners: computeRoundResult()
+    });
+  }
+  res.json({ preview:false, winners: lastRoundResult?.winners || [] });
+});
+
+// Admin: turu manuel bitir
+app.post("/api/admin/round/end", (req,res) => {
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (roundStatus !== 'active') return res.status(400).json({ error:"Tur zaten bitmiş" });
+  endRound();
+  res.json({ ok:true, result: lastRoundResult });
+});
+
+// Admin: yeni tur başlat (ödüller dağıtıldıktan SONRA)
+app.post("/api/admin/round/start", (req,res) => {
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (roundStatus === 'active') return res.status(400).json({ error:"Zaten aktif tur var" });
+  startNewRound();
+  res.json({ ok:true, round: { number: roundNumber, startTime: roundStartTime, endTime: roundEndTime } });
 });
 
 io.on("connection", socket=>{

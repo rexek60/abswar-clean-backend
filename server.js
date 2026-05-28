@@ -291,12 +291,13 @@ function getPlayer(wallet) {
   if (!players.has(id)) {
     players.set(id, {
       wallet:id,
+      nickname:null,  // Kullanıcının seçtiği nickname (3-16 karakter)
       country_code:null,
       bullets:100,
       contribution:0,
       attacks:0,
-      kills:0,        // Saldırılarıyla elenen ülkelere katkı sayısı
-      deaths:0,       // Üyesi olduğu ülke kaç kez elendi
+      kills:0,
+      deaths:0,
       created_at:Date.now(),
       alliance_id:null
     });
@@ -309,8 +310,10 @@ function publicAlliance(a) {
     id:a.id,
     name:a.name,
     country_code:a.country_code,
+    leader:a.leader,
     score:a.score,
     members:[...a.members],
+    memberCount:a.members.size,
     created_at:a.created_at
   };
 }
@@ -379,6 +382,28 @@ app.post("/api/player/choose-country", (req,res)=>{
 
   player.country_code = countryCode;
   emitState();
+  res.json({ ok:true, player });
+});
+
+// Nickname ayarlama (oyun başlangıcında bir kez veya değiştirme)
+app.post("/api/player/nickname", rateLimited, (req,res)=>{
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  const player = getPlayer(req.body.wallet);
+  const nickname = String(req.body.nickname || "").trim().slice(0,16);
+
+  if (nickname.length < 3) return res.status(400).json({ error:"Nickname en az 3 karakter olmalı" });
+  if (!isCleanText(nickname)) return res.status(400).json({ error:"Uygunsuz nickname — başka bir isim seç" });
+  // Geçerli karakter kontrolü (harf, rakam, _, -, boşluk)
+  if (!/^[\p{L}\p{N}_\- ]+$/u.test(nickname)) {
+    return res.status(400).json({ error:"Nickname sadece harf, rakam, _, - içerebilir" });
+  }
+  // Aynı nickname kontrolü
+  for (const p of players.values()) {
+    if (p.wallet !== player.wallet && p.nickname && p.nickname.toLowerCase() === nickname.toLowerCase()) {
+      return res.status(400).json({ error:"Bu nickname zaten alınmış" });
+    }
+  }
+  player.nickname = nickname;
   res.json({ ok:true, player });
 });
 
@@ -454,6 +479,35 @@ app.post("/api/alliance/join", rateLimited, (req,res)=>{
   emitState();
 
   res.json({ ok:true, alliance:publicAlliance(alliance), player });
+});
+
+app.post("/api/alliance/leave", rateLimited, (req,res)=>{
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  const player = getPlayer(req.body.wallet);
+  if (!player.alliance_id) return res.status(400).json({ error:"Ittifakta degilsin" });
+  const alliance = alliances.get(player.alliance_id);
+  if (!alliance) {
+    player.alliance_id = null;
+    return res.json({ ok:true, message:"Ittifak silinmis — durum temizlendi", player });
+  }
+  alliance.members.delete(player.wallet);
+  const wasLeader = alliance.leader === player.wallet;
+  player.alliance_id = null;
+
+  // Lider ayrıldı VE üye varsa → en eski üyeyi yeni lider yap
+  if (wasLeader && alliance.members.size > 0) {
+    alliance.leader = [...alliance.members][0];
+    addAllianceFeed("LEADER", "Yeni lider: " + alliance.leader.slice(0,8), { allianceId:alliance.id });
+  }
+  // Üye kalmadıysa ittifağı sil
+  if (alliance.members.size === 0) {
+    alliances.delete(alliance.id);
+    addAllianceFeed("DISBAND", alliance.name + " ittifaki dagildi", { allianceId:alliance.id });
+  } else {
+    addAllianceFeed("LEAVE", player.wallet.slice(0,8) + " ittifaktan ayrildi", { allianceId:alliance.id });
+  }
+  emitState();
+  res.json({ ok:true, player });
 });
 
 app.post("/api/alliance/radio", rateLimited, (req,res)=>{

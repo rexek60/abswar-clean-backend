@@ -295,8 +295,10 @@ function getPlayer(wallet) {
       bullets:100,
       contribution:0,
       attacks:0,
-      alliance_id:null,
-      created_at:Date.now()
+      kills:0,        // Saldırılarıyla elenen ülkelere katkı sayısı
+      deaths:0,       // Üyesi olduğu ülke kaç kez elendi
+      created_at:Date.now(),
+      alliance_id:null
     });
   }
   return players.get(id);
@@ -504,7 +506,15 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
 
   if (target.hp <= 0 && !target.eliminated) {
     target.eliminated = true;
-    io.emit("country:eliminated", { country: target.code });
+    // Saldıran oyuncuya "kill" katkısı
+    player.kills = (player.kills || 0) + 1;
+    // Elenen ülkenin tüm oyuncularına "death" işle
+    for (const p of players.values()) {
+      if (p.country_code === target.code) {
+        p.deaths = (p.deaths || 0) + 1;
+      }
+    }
+    io.emit("country:eliminated", { country: target.code, by: player.wallet });
     // Tek ülke kaldı mı?
     const alive = countries.filter(c => !c.eliminated);
     if (alive.length <= 1 && roundStatus === 'active') {

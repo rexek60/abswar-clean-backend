@@ -403,6 +403,13 @@ app.post("/api/alliance/create", rateLimited, (req,res)=>{
 
   if (!name) return res.status(400).json({ error:"Alliance adi gerekli" });
   if (name.length < 3) return res.status(400).json({ error:"Alliance adi en az 3 karakter" });
+  if (alliances.size >= 100) return res.status(400).json({ error:"Maks ittifak sayisina ulasildi (100). Sonraki turda dene." });
+  // Aynı isimde ittifak var mı?
+  for (const a of alliances.values()) {
+    if (a.name.toLowerCase() === name.toLowerCase()) {
+      return res.status(400).json({ error:"Bu isimde bir ittifak zaten var" });
+    }
+  }
   if (!isCleanText(name)) return res.status(400).json({ error:"Uygunsuz isim — lütfen başka bir isim seç" });
   if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
   if (player.alliance_id) return res.status(400).json({ error:"Zaten alliance icindesin" });
@@ -438,6 +445,7 @@ app.post("/api/alliance/join", rateLimited, (req,res)=>{
   if (!alliance) return res.status(404).json({ error:"Alliance bulunamadi" });
   if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
   if (player.alliance_id) return res.status(400).json({ error:"Zaten alliance icindesin" });
+  if (alliance.members.size >= 50) return res.status(400).json({ error:"İttifak dolu (maks 50 üye)" });
 
   player.alliance_id = allianceId;
   alliance.members.add(player.wallet);
@@ -535,7 +543,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   };
 
   recentAttacks.unshift(attack);
-  if (recentAttacks.length > 30) recentAttacks.pop();
+  if (recentAttacks.length > 100) recentAttacks.pop();
 
   io.emit("war:attack", attack);
   io.emit("hp:update", { target: target.code, newHP: target.hp });

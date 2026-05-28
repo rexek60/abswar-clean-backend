@@ -372,12 +372,12 @@ app.post("/api/player/choose-country", (req,res)=>{
   const player = getPlayer(wallet);
   const country = countries.find(c=>c.code===countryCode);
 
-  if (!country) return res.status(404).json({ error:"Country not found" });
-  if (country.eliminated) return res.status(400).json({ error:"Country eliminated" });
+  if (!country) return res.status(404).json({ error:"Ülke bulunamadı" });
+  if (country.eliminated) return res.status(400).json({ error:"Bu ülke elenmiş" });
 
   if (player.country_code) {
     const current = countries.find(c=>c.code===player.country_code);
-    if (current && !current.eliminated) return res.status(403).json({ error:"Ulken elenmeden baska ulkeye gecemezsin" });
+    if (current && !current.eliminated) return res.status(403).json({ error:"Ülken elenmeden başka ülkeye geçemezsin" });
   }
 
   player.country_code = countryCode;
@@ -387,7 +387,7 @@ app.post("/api/player/choose-country", (req,res)=>{
 
 // Nickname ayarlama (oyun başlangıcında bir kez veya değiştirme)
 app.post("/api/player/nickname", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const nickname = String(req.body.nickname || "").trim().slice(0,16);
 
@@ -408,7 +408,7 @@ app.post("/api/player/nickname", rateLimited, (req,res)=>{
 });
 
 app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const pack = Number(req.body.pack || 1);
   const packs = { 100:100, 500:1000, 2000:10000, 9999:100000 };
@@ -421,14 +421,14 @@ app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
 });
 
 app.post("/api/alliance/create", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const name = String(req.body.name || "").trim().slice(0,24);
   const player = getPlayer(wallet);
 
-  if (!name) return res.status(400).json({ error:"Alliance adi gerekli" });
-  if (name.length < 3) return res.status(400).json({ error:"Alliance adi en az 3 karakter" });
-  if (alliances.size >= 100) return res.status(400).json({ error:"Maks ittifak sayisina ulasildi (100). Sonraki turda dene." });
+  if (!name) return res.status(400).json({ error:"İttifak adı gerekli" });
+  if (name.length < 3) return res.status(400).json({ error:"İttifak adı en az 3 karakter" });
+  if (alliances.size >= 100) return res.status(400).json({ error:"Maksimum ittifak sayısına ulaşıldı (100). Sonraki turda dene." });
   // Aynı isimde ittifak var mı?
   for (const a of alliances.values()) {
     if (a.name.toLowerCase() === name.toLowerCase()) {
@@ -436,8 +436,8 @@ app.post("/api/alliance/create", rateLimited, (req,res)=>{
     }
   }
   if (!isCleanText(name)) return res.status(400).json({ error:"Uygunsuz isim — lütfen başka bir isim seç" });
-  if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
-  if (player.alliance_id) return res.status(400).json({ error:"Zaten alliance icindesin" });
+  if (!player.country_code) return res.status(400).json({ error:"Önce ülke seçmelisin" });
+  if (player.alliance_id) return res.status(400).json({ error:"Zaten bir ittifaktasın" });
 
   const id = "A-" + Math.random().toString(36).slice(2,8).toUpperCase();
 
@@ -461,15 +461,15 @@ app.post("/api/alliance/create", rateLimited, (req,res)=>{
 });
 
 app.post("/api/alliance/join", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const allianceId = String(req.body.allianceId || "");
   const player = getPlayer(wallet);
   const alliance = alliances.get(allianceId);
 
-  if (!alliance) return res.status(404).json({ error:"Alliance bulunamadi" });
-  if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
-  if (player.alliance_id) return res.status(400).json({ error:"Zaten alliance icindesin" });
+  if (!alliance) return res.status(404).json({ error:"İttifak bulunamadı" });
+  if (!player.country_code) return res.status(400).json({ error:"Önce ülke seçmelisin" });
+  if (player.alliance_id) return res.status(400).json({ error:"Zaten bir ittifaktasın" });
   if (alliance.members.size >= 50) return res.status(400).json({ error:"İttifak dolu (maks 50 üye)" });
 
   player.alliance_id = allianceId;
@@ -482,9 +482,9 @@ app.post("/api/alliance/join", rateLimited, (req,res)=>{
 });
 
 app.post("/api/alliance/leave", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
-  if (!player.alliance_id) return res.status(400).json({ error:"Ittifakta degilsin" });
+  if (!player.alliance_id) return res.status(400).json({ error:"İttifakta değilsin" });
   const alliance = alliances.get(player.alliance_id);
   if (!alliance) {
     player.alliance_id = null;
@@ -511,14 +511,14 @@ app.post("/api/alliance/leave", rateLimited, (req,res)=>{
 });
 
 app.post("/api/alliance/radio", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const command = String(req.body.command || "").toUpperCase();
   const player = getPlayer(wallet);
 
   const allowed = ["ATTACK_NOW","DEFEND","NEED_SUPPORT","FALL_BACK","ENEMY_DETECTED","PUSH_FINAL","REGROUP","RETREAT","FOCUS_FIRE","SCATTER"];
-  if (!allowed.includes(command)) return res.status(400).json({ error:"Gecersiz komut" });
-  if (!player.alliance_id) return res.status(400).json({ error:"Alliance icinde degilsin" });
+  if (!allowed.includes(command)) return res.status(400).json({ error:"Geçersiz komut" });
+  if (!player.alliance_id) return res.status(400).json({ error:"İttifakta değilsin" });
 
   const alliance = alliances.get(player.alliance_id);
   alliance.score += 1;
@@ -531,7 +531,7 @@ app.post("/api/alliance/radio", rateLimited, (req,res)=>{
 });
 
 app.post("/api/game/attack", rateLimited, (req,res)=>{
-  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Gecersiz wallet" });
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const targetCountry = String(req.body.targetCountry || "").toUpperCase().slice(0,3);
 
@@ -544,16 +544,16 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   cooldowns.set(player.wallet, now);
 
   if (roundStatus !== 'active') return res.status(400).json({ error:"Tur aktif değil — yeni tur bekleniyor" });
-  if (!player.country_code) return res.status(400).json({ error:"Once ulke secmelisin" });
+  if (!player.country_code) return res.status(400).json({ error:"Önce ülke seçmelisin" });
   if (player.bullets <= 0) return res.status(400).json({ error:"Mermin yok! Pazardan mermi al." });
 
   const own = countries.find(c=>c.code===player.country_code);
   const target = countries.find(c=>c.code===targetCountry);
 
-  if (!target) return res.status(404).json({ error:"Target country not found" });
-  if (own.code === target.code) return res.status(400).json({ error:"Kendi ulkeni vuramazsin" });
-  if (target.eliminated) return res.status(400).json({ error:"Bu ulke elenmis" });
-  if (own.eliminated) return res.status(400).json({ error:"Ulken elenmis — saldiramazsin" });
+  if (!target) return res.status(404).json({ error:"Hedef ülke bulunamadı" });
+  if (own.code === target.code) return res.status(400).json({ error:"Kendi ülkeni vuramazsın" });
+  if (target.eliminated) return res.status(400).json({ error:"Bu ülke elenmiş" });
+  if (own.eliminated) return res.status(400).json({ error:"Ülken elenmiş — saldıramazsın" });
 
   player.bullets -= 1;
   target.hp = Math.max(0, target.hp - 1);
@@ -611,7 +611,7 @@ console.log("ADMIN_TOKEN (kullan x-admin-token header):", ADMIN_TOKEN);
 
 app.post("/api/admin/reset", (req,res)=>{
   const token = req.headers['x-admin-token'] || (req.body && req.body.token);
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error:"Yetki yok" });
+  if (token !== ADMIN_TOKEN) return res.status(403).json({ error:"Yetkin yok" });
   countries.forEach(c=>{ c.hp=1000; c.max_hp=1000; c.eliminated=false; });
   players.clear();
   recentAttacks.length=0;
@@ -644,7 +644,7 @@ app.get("/api/round/status", (_req,res) => {
 
 // Admin: kazanan listesini gör (ödeme yapmadan önce kontrol)
 app.get("/api/admin/round/winners", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetkin yok" });
   if (roundStatus === 'active') {
     return res.json({
       preview: true,
@@ -657,7 +657,7 @@ app.get("/api/admin/round/winners", (req,res) => {
 
 // Admin: turu manuel bitir
 app.post("/api/admin/round/end", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetkin yok" });
   if (roundStatus !== 'active') return res.status(400).json({ error:"Tur zaten bitmiş" });
   endRound();
   res.json({ ok:true, result: lastRoundResult });
@@ -665,7 +665,7 @@ app.post("/api/admin/round/end", (req,res) => {
 
 // Admin: yeni tur başlat (ödüller dağıtıldıktan SONRA)
 app.post("/api/admin/round/start", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetki yok" });
+  if (!checkAdmin(req)) return res.status(403).json({ error:"Yetkin yok" });
   if (roundStatus === 'active') return res.status(400).json({ error:"Zaten aktif tur var" });
   startNewRound();
   res.json({ ok:true, round: { number: roundNumber, startTime: roundStartTime, endTime: roundEndTime } });

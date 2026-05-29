@@ -299,11 +299,43 @@ function getPlayer(wallet) {
       kills:0,
       deaths:0,
       radar_level:3,
+      resources: {       // 0-100 arası seviyeler
+        oil:0,     // Petrol — %100'de +10 mermi
+        metal:0,   // Metal — seviye×%1 hasar bonusu
+        uranium:0, // Uranyum — seviye×%1 kalkan
+        energy:0   // Enerji — %100'de +50 HP
+      },
       created_at:Date.now(),
       alliance_id:null
     });
   }
   return players.get(id);
+}
+
+/* ── RÜTBE SİSTEMİ ── */
+const RANKS = [
+  { min:0,      name:'Asker',    icon:'🪖',          bonus:0   },
+  { min:50,     name:'Onbaşı',   icon:'🎖',          bonus:0.05 },
+  { min:200,    name:'Çavuş',    icon:'🎖🎖',        bonus:0.10 },
+  { min:500,    name:'Teğmen',   icon:'⭐',          bonus:0.15 },
+  { min:1500,   name:'Yüzbaşı',  icon:'⭐⭐',        bonus:0.20 },
+  { min:5000,   name:'Binbaşı',  icon:'⭐⭐⭐',      bonus:0.25 },
+  { min:15000,  name:'General',  icon:'⭐⭐⭐⭐',    bonus:0.30 }
+];
+
+function getRank(contribution) {
+  let r = RANKS[0];
+  for (const rank of RANKS) {
+    if (contribution >= rank.min) r = rank;
+  }
+  return r;
+}
+
+function getNextRank(contribution) {
+  for (const rank of RANKS) {
+    if (contribution < rank.min) return rank;
+  }
+  return null; // En yüksek rütbedeyiz
 }
 
 function publicAlliance(a) {
@@ -419,6 +451,47 @@ app.post("/api/player/radar-upgrade", rateLimited, (req,res)=>{
   player.bullets -= cost;
   player.radar_level++;
   res.json({ ok:true, player });
+});
+
+// Kaynak üretimi — 1 mermi → seviye +10. %100'de bonus alır ve sıfırlanır.
+app.post("/api/player/produce-resource", rateLimited, (req,res)=>{
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
+  const player = getPlayer(req.body.wallet);
+  const which = String(req.body.resource || "").toLowerCase();
+  if (!['oil','metal','uranium','energy'].includes(which)) {
+    return res.status(400).json({ error:"Geçersiz kaynak" });
+  }
+  if (player.bullets < 1) return res.status(400).json({ error:"Yetersiz mermi (1 gerekir)" });
+  if (!player.resources) player.resources = { oil:0, metal:0, uranium:0, energy:0 };
+
+  player.bullets -= 1;
+  player.resources[which] = Math.min(100, (player.resources[which]||0) + 10);
+
+  let bonus = null;
+  // %100'e ulaştıysa ödülü ver ve sıfırla
+  if (player.resources[which] >= 100) {
+    if (which === 'oil') {
+      player.bullets += 10;
+      bonus = { type:'bullets', amount:10, message:'🛢️ Petrol %100! +10 mermi' };
+    } else if (which === 'energy') {
+      // Kendi ülkene +50 HP
+      if (player.country_code) {
+        const myCountry = countries.find(c => c.code === player.country_code);
+        if (myCountry && !myCountry.eliminated) {
+          myCountry.hp = Math.min(myCountry.max_hp, myCountry.hp + 50);
+          bonus = { type:'hp', amount:50, message:'⚡ Enerji %100! Ülken +50 HP' };
+          io.emit("hp:update", { target: myCountry.code, newHP: myCountry.hp });
+        }
+      }
+    }
+    // Metal ve uranyum %100'de aktif kalır — seviye yüksek tutmak fayda sağlar
+    // ama 100'de kalsın, sıfırlamayalım çünkü kalkan/hasar bonusu sürekli aktif
+    if (which !== 'metal' && which !== 'uranium') {
+      player.resources[which] = 0;
+    }
+  }
+  emitState();
+  res.json({ ok:true, player, bonus });
 });
 
 app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
@@ -570,14 +643,35 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   if (own.eliminated) return res.status(400).json({ error:"Ülken elenmiş — saldıramazsın" });
 
   player.bullets -= 1;
-  target.hp = Math.max(0, target.hp - 1);
-  own.hp += 1;
-  player.contribution += 1;
+
+  // ── KAYNAK ETKİLERİ ──
+  if (!player.resources) player.resources = { oil:0, metal:0, uranium:0, energy:0 };
+  // Saldıran: Metal seviyesi×%1 ekstra hasar (max %10)
+  const attackerMetal = Math.min(player.resources.metal||0, 10);
+  // Hedef ülkenin en katkılı oyuncusunun uranyumu kalkan olarak çalışır
+  let defenderUranium = 0;
+  const defenderTop = [...players.values()]
+    .filter(p => p.country_code === target.code)
+    .sort((a,b) => (b.contribution||0) - (a.contribution||0))[0];
+  if (defenderTop && defenderTop.resources) {
+    defenderUranium = Math.min(defenderTop.resources.uranium||0, 10);
+  }
+
+  // Hasar hesaplaması: 1 + metal bonus - uranyum kalkanı (min 1 olur)
+  const damage = Math.max(1, Math.round(1 + (attackerMetal/100) - (defenderUranium/100)));
+
+  target.hp = Math.max(0, target.hp - damage);
+  own.hp += damage;
+
+  // ── RÜTBE BONUSU ──
+  const rank = getRank(player.contribution);
+  const contribGain = 1 + rank.bonus; // %5-%30 arası ekstra puan
+  player.contribution += contribGain;
   player.attacks += 1;
 
   if (player.alliance_id && alliances.has(player.alliance_id)) {
     const alliance = alliances.get(player.alliance_id);
-    alliance.score += 1;
+    alliance.score += contribGain;
   }
 
   if (target.hp <= 0 && !target.eliminated) {
@@ -603,7 +697,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
     target_country: target.code,
     attackerCountry: own.code,
     targetCountry: target.code,
-    damage:1,
+    damage:damage,
     newHp: target.hp,
     wallet:player.wallet,
     alliance_id:player.alliance_id,
@@ -617,7 +711,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   io.emit("hp:update", { target: target.code, newHP: target.hp });
   emitState();
 
-  res.json({ ok:true, attack, player, newHp: target.hp, damage:1 });
+  res.json({ ok:true, attack, player, newHp: target.hp, damage:damage });
 });
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ("abswar-admin-" + Math.random().toString(36).slice(2,10));

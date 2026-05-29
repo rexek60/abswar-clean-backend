@@ -291,13 +291,14 @@ function getPlayer(wallet) {
   if (!players.has(id)) {
     players.set(id, {
       wallet:id,
-      nickname:null,  // Kullanıcının seçtiği nickname (3-16 karakter)
+      nickname:null,
       country_code:null,
       bullets:100,
       contribution:0,
       attacks:0,
       kills:0,
       deaths:0,
+      radar_level:3,
       created_at:Date.now(),
       alliance_id:null
     });
@@ -404,6 +405,19 @@ app.post("/api/player/nickname", rateLimited, (req,res)=>{
     }
   }
   player.nickname = nickname;
+  res.json({ ok:true, player });
+});
+
+// Radar yükseltme — 5 mermi karşılığı seviye atlat
+app.post("/api/player/radar-upgrade", rateLimited, (req,res)=>{
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ error:"Geçersiz cüzdan" });
+  const player = getPlayer(req.body.wallet);
+  if (!player.radar_level) player.radar_level = 3;
+  if (player.radar_level >= 10) return res.status(400).json({ error:"Radar zaten maksimum seviyede (10)" });
+  const cost = 5;
+  if (player.bullets < cost) return res.status(400).json({ error:`Yetersiz mermi (${cost} gerekir)` });
+  player.bullets -= cost;
+  player.radar_level++;
   res.json({ ok:true, player });
 });
 
@@ -524,7 +538,7 @@ app.post("/api/alliance/radio", rateLimited, (req,res)=>{
   alliance.score += 1;
 
   const msg = alliance.name + ": " + command;
-  addAllianceFeed("RADIO", msg, { allianceId:alliance.id, command, wallet:player.wallet });
+  addAllianceFeed("RADIO", msg, { allianceId:alliance.id, command, wallet:player.wallet, nickname:player.nickname, country:player.country_code });
   emitState();
 
   res.json({ ok:true, message:msg });

@@ -266,11 +266,20 @@ function checkRateLimit(wallet) {
 }
 
 // Yasaklı/küfür kelime filtresi (basit)
-const BANNED_WORDS = ['amk','aq','oç','orospu','siktir','piç','salak','aptal','admin','official','anthropic','claude'];
+// Küfür / kötü kullanım filtresi
+// Önemli: 'aq', 'oç' gibi kısa parçalar "Yaqar", "Boçak" gibi normal isimlere
+// substring olarak takılıyordu. Şimdi tam kelime eşleşmesi yapıyoruz.
+const BANNED_WORDS = ['orospu','siktir','amına','anandan','anasını','allahını','piçkurusu','admin','official','anthropic','claude','moderator','sistem'];
 function isCleanText(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase();
-  return !BANNED_WORDS.some(w => lower.includes(w));
+  // Tam kelime veya kelime başında/sonunda kontrol (substring değil)
+  // Boşluk veya kelime sınırlarıyla ayrılmış olmalı
+  for (const w of BANNED_WORDS) {
+    const re = new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`, 'i');
+    if (re.test(text)) return false;
+  }
+  return true;
 }
 
 function validWallet(w) {

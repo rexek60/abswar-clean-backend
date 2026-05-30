@@ -145,6 +145,10 @@ const countries = [
 
 const players = new Map();
 const recentAttacks = [];
+// İlk 100 kullanıcı hediye sistemi
+const GIFT_LIMIT = 100;       // İlk kaç kullanıcı bonus alır
+const GIFT_AMOUNT = 100;      // Bonus mermi miktarı
+const giftedWallets = new Set(); // Hediye alan cüzdanlar
 const cooldowns = new Map();
 const alliances = new Map();
 const allianceFeed = [];
@@ -368,6 +372,7 @@ function state() {
     countries,
     recentAttacks,
     onlinePlayers,
+    giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size),
     leaderboard,
     alliances: allianceList,
     allianceFeed,
@@ -404,8 +409,25 @@ app.get("/health", (_req,res)=>res.json({ ok:true, realtime:true, alliance:true,
 app.get("/api/game/state", (_req,res)=>res.json(state()));
 
 app.post("/api/player/connect", (req,res)=>{
+  if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
+  const id = String(req.body.wallet).toLowerCase();
+  const isNewPlayer = !players.has(id);
   const player = getPlayer(req.body.wallet);
-  res.json({ ok:true, player });
+
+  // İlk 100 kullanıcı hediye mermi sistemi
+  let gift = null;
+  if (isNewPlayer && !giftedWallets.has(id) && giftedWallets.size < GIFT_LIMIT) {
+    giftedWallets.add(id);
+    player.bullets += GIFT_AMOUNT;
+    player.gifted = true;
+    gift = {
+      amount: GIFT_AMOUNT,
+      rank: giftedWallets.size, // Kaçıncı kullanıcı olduğu (1-100)
+      remaining: GIFT_LIMIT - giftedWallets.size
+    };
+  }
+
+  res.json({ ok:true, player, gift, giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size) });
 });
 
 app.post("/api/player/choose-country", (req,res)=>{
@@ -735,6 +757,7 @@ app.post("/api/admin/reset", (req,res)=>{
   cooldowns.clear();
   alliances.clear();
   allianceFeed.length=0;
+  giftedWallets.clear();  // Hediye sayacını da sıfırla (tam reset)
   emitState();
   res.json({ ok:true, message:"ABSWAR alliance beta reset complete" });
 });

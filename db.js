@@ -85,12 +85,13 @@ export async function initSchema() {
       );
 
       CREATE TABLE IF NOT EXISTS alliances (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        leader      TEXT,
-        members     JSONB DEFAULT '[]',
-        score       DOUBLE PRECISION DEFAULT 0,
-        created_at  BIGINT
+        id            TEXT PRIMARY KEY,
+        name          TEXT NOT NULL,
+        leader        TEXT,
+        country_code  TEXT,
+        members       JSONB DEFAULT '[]',
+        score         DOUBLE PRECISION DEFAULT 0,
+        created_at    BIGINT
       );
 
       CREATE TABLE IF NOT EXISTS countries (
@@ -109,6 +110,20 @@ export async function initSchema() {
         wallet TEXT PRIMARY KEY
       );
     `);
+
+    // ── Migration'lar — mevcut tablolara eksik sütun/tablo ekle ──
+    // (CREATE TABLE IF NOT EXISTS mevcut tabloya sütun eklemez, bu yüzden ALTER gerekli)
+    await pool.query(`ALTER TABLE alliances ADD COLUMN IF NOT EXISTS country_code TEXT;`);
+
+    // Son saldırılar tablosu (radar + haber ticker için kalıcılık)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS recent_attacks (
+        id           BIGSERIAL PRIMARY KEY,
+        data         JSONB,
+        created_at   BIGINT
+      );
+    `);
+
     console.log("[DB] Şema hazır ✅");
     return true;
   } catch (e) {
@@ -149,6 +164,7 @@ export async function loadAll() {
         id: row.id,
         name: row.name,
         leader: row.leader,
+        country_code: row.country_code || null,
         members: row.members || [],
         score: Number(row.score),
         created_at: Number(row.created_at) || Date.now(),
@@ -195,10 +211,10 @@ export function savePlayer(p) {
 export function saveAlliance(a) {
   if (!HAS_DB || !a) return;
   pool.query(
-    `INSERT INTO alliances (id,name,leader,members,score,created_at)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (id) DO UPDATE SET name=$2, leader=$3, members=$4, score=$5`,
-    [a.id, a.name, a.leader, JSON.stringify(a.members||[]), a.score, a.created_at || Date.now()]
+    `INSERT INTO alliances (id,name,leader,country_code,members,score,created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT (id) DO UPDATE SET name=$2, leader=$3, country_code=$4, members=$5, score=$6`,
+    [a.id, a.name, a.leader, a.country_code || null, JSON.stringify(a.members||[]), a.score, a.created_at || Date.now()]
   ).catch(e => console.error("[DB] saveAlliance:", e.message));
 }
 
@@ -233,6 +249,38 @@ export function saveGameState(key, value) {
   ).catch(e => console.error("[DB] saveGameState:", e.message));
 }
 
+// ── SON SALDIRILAR (radar + haber ticker için) ──
+// Yeni saldırı ekle, sadece son 100'ü tut (eski kayıtları sil)
+export function saveAttack(attack) {
+  if (!HAS_DB || !attack) return;
+  pool.query(
+    `INSERT INTO recent_attacks (data, created_at) VALUES ($1, $2)`,
+    [JSON.stringify(attack), attack.created_at || Date.now()]
+  ).then(() => {
+    // Ara sıra eski kayıtları temizle (her ~20 saldırıda bir, rastgele)
+    if (Math.random() < 0.05) {
+      pool.query(`
+        DELETE FROM recent_attacks
+        WHERE id NOT IN (SELECT id FROM recent_attacks ORDER BY id DESC LIMIT 100)
+      `).catch(()=>{});
+    }
+  }).catch(e => console.error("[DB] saveAttack:", e.message));
+}
+
+// Başlangıçta son saldırıları yükle (en yeniden eskiye)
+export async function loadRecentAttacks(limit = 100) {
+  if (!HAS_DB) return [];
+  try {
+    const r = await pool.query(
+      `SELECT data FROM recent_attacks ORDER BY id DESC LIMIT $1`, [limit]
+    );
+    return r.rows.map(row => (typeof row.data === 'string' ? JSON.parse(row.data) : row.data));
+  } catch (e) {
+    console.error("[DB] loadRecentAttacks:", e.message);
+    return [];
+  }
+}
+
 export function addGiftedWallet(wallet) {
   if (!HAS_DB) return;
   pool.query("INSERT INTO gifted_wallets (wallet) VALUES ($1) ON CONFLICT DO NOTHING", [wallet])
@@ -243,7 +291,7 @@ export function addGiftedWallet(wallet) {
 export async function wipeAll() {
   if (!HAS_DB) return;
   try {
-    await pool.query("TRUNCATE players, alliances, gifted_wallets");
+    await pool.query("TRUNCATE players, alliances, gifted_wallets, recent_attacks");
     await pool.query("DELETE FROM game_state");
     // countries silinmez — HP'leri reset endpoint'i güncelleyecek
     console.log("[DB] Tüm veriler silindi (reset)");

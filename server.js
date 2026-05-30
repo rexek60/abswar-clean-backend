@@ -221,6 +221,7 @@ function persistAlliance(a) {
     id: a.id,
     name: a.name,
     leader: a.leader,
+    country_code: a.country_code || null,
     members: a.members instanceof Set ? [...a.members] : (a.members || []),
     score: a.score || 0,
     created_at: a.created_at || Date.now()
@@ -784,6 +785,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
 
   recentAttacks.unshift(attack);
   if (recentAttacks.length > 100) recentAttacks.pop();
+  db.saveAttack(attack);
 
   io.emit("war:attack", attack);
   io.emit("hp:update", { target: target.code, newHP: target.hp });
@@ -877,6 +879,16 @@ io.on("connection", socket=>{
 async function bootstrap() {
   await db.initSchema();
   const loaded = await db.loadAll();
+
+  // Son saldırıları yükle (radar + haber ticker bootstrap için)
+  try {
+    const attacks = await db.loadRecentAttacks(100);
+    if (attacks && attacks.length > 0) {
+      // En yeni en başta olacak şekilde belleğe koy
+      for (const a of attacks) recentAttacks.push(a);
+      console.log(`[DB] ${attacks.length} son saldırı yüklendi`);
+    }
+  } catch(e) { /* sessizce geç */ }
 
   if (loaded) {
     // Oyuncuları belleğe yükle

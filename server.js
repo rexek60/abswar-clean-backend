@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import http from "http";
 import { Server } from "socket.io";
+import * as db from "./db.js";
 
 dotenv.config();
 
@@ -209,6 +210,23 @@ function computeRoundResult() {
   }));
 }
 
+function persistRoundState() {
+  db.saveGameState('round', { roundNumber, roundStatus, roundStartTime, roundEndTime, lastRoundResult });
+}
+
+// İttifakı DB'ye kaydet — members Set'ini array'e çevirir (DB JSON array bekler)
+function persistAlliance(a) {
+  if (!a) return;
+  db.saveAlliance({
+    id: a.id,
+    name: a.name,
+    leader: a.leader,
+    members: a.members instanceof Set ? [...a.members] : (a.members || []),
+    score: a.score || 0,
+    created_at: a.created_at || Date.now()
+  });
+}
+
 function endRound() {
   if (roundStatus !== 'active') return;
   roundStatus = 'ended';
@@ -220,6 +238,7 @@ function endRound() {
     note: 'Ödüller admin onayı bekliyor (smart contract payReward).'
   };
   io.emit('round:ended', lastRoundResult);
+  persistRoundState();
   console.log(`[ROUND ${roundNumber}] BİTTİ — Kazananlar:`, winners.map(w=>`${w.flag} ${w.country} (${w.sharePct}%)`).join(' | '));
 }
 
@@ -235,7 +254,10 @@ function startNewRound() {
   cooldowns.clear();
   allianceFeed.length = 0;
   // İttifak skorlarını sıfırla
-  alliances.forEach(a => { a.score = 0; });
+  alliances.forEach(a => { a.score = 0; persistAlliance(a); });
+  // DB'ye yaz: ülkeler + tur durumu
+  db.saveAllCountries(countries);
+  persistRoundState();
   io.emit('round:started', { roundNumber, roundStartTime, roundEndTime });
   emitState();
   console.log(`[ROUND ${roundNumber}] BAŞLADI`);
@@ -425,7 +447,10 @@ app.post("/api/player/connect", (req,res)=>{
       rank: giftedWallets.size, // Kaçıncı kullanıcı olduğu (1-100)
       remaining: GIFT_LIMIT - giftedWallets.size
     };
+    db.addGiftedWallet(id);
   }
+  // Yeni oyuncu veya hediye verildi → kaydet
+  if (isNewPlayer || gift) db.savePlayer(player);
 
   res.json({ ok:true, player, gift, giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size) });
 });
@@ -445,6 +470,7 @@ app.post("/api/player/choose-country", (req,res)=>{
   }
 
   player.country_code = countryCode;
+  db.savePlayer(player);
   emitState();
   res.json({ ok:true, player });
 });
@@ -468,6 +494,7 @@ app.post("/api/player/nickname", rateLimited, (req,res)=>{
     }
   }
   player.nickname = nickname;
+  db.savePlayer(player);
   res.json({ ok:true, player });
 });
 
@@ -481,6 +508,7 @@ app.post("/api/player/radar-upgrade", rateLimited, (req,res)=>{
   if (player.bullets < cost) return res.status(400).json({ code:"INSUFFICIENT_BULLETS", error:`Yetersiz mermi (${cost} gerekir)` });
   player.bullets -= cost;
   player.radar_level++;
+  db.savePlayer(player);
   res.json({ ok:true, player });
 });
 
@@ -512,6 +540,7 @@ app.post("/api/player/produce-resource", rateLimited, (req,res)=>{
           myCountry.hp = Math.min(myCountry.max_hp, myCountry.hp + 50);
           bonus = { type:'hp', amount:50, message:'⚡ Enerji %100! Ülken +50 HP' };
           io.emit("hp:update", { target: myCountry.code, newHP: myCountry.hp });
+          db.saveCountry(myCountry);
         }
       }
     }
@@ -521,6 +550,7 @@ app.post("/api/player/produce-resource", rateLimited, (req,res)=>{
       player.resources[which] = 0;
     }
   }
+  db.savePlayer(player);
   emitState();
   res.json({ ok:true, player, bonus });
 });
@@ -532,6 +562,7 @@ app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
   const packs = { 100:100, 500:1000, 2000:10000, 9999:100000 };
   const bullets = packs[pack] || 100;
   player.bullets += bullets;
+  db.savePlayer(player);
 
   io.emit("market:purchase", { wallet:player.wallet, pack, bullets });
   emitState();
@@ -571,6 +602,8 @@ app.post("/api/alliance/create", rateLimited, (req,res)=>{
 
   alliances.set(id, alliance);
   player.alliance_id = id;
+  persistAlliance(alliance);
+  db.savePlayer(player);
 
   addAllianceFeed("CREATE", name + " alliance kuruldu", { id, wallet:player.wallet });
   emitState();
@@ -592,6 +625,8 @@ app.post("/api/alliance/join", rateLimited, (req,res)=>{
 
   player.alliance_id = allianceId;
   alliance.members.add(player.wallet);
+  persistAlliance(alliance);
+  db.savePlayer(player);
 
   addAllianceFeed("JOIN", player.wallet.slice(0,8) + " " + alliance.name + " alliance'a katildi", { allianceId });
   emitState();
@@ -606,6 +641,7 @@ app.post("/api/alliance/leave", rateLimited, (req,res)=>{
   const alliance = alliances.get(player.alliance_id);
   if (!alliance) {
     player.alliance_id = null;
+    db.savePlayer(player);
     return res.json({ ok:true, message:"Ittifak silinmis — durum temizlendi", player });
   }
   alliance.members.delete(player.wallet);
@@ -620,10 +656,13 @@ app.post("/api/alliance/leave", rateLimited, (req,res)=>{
   // Üye kalmadıysa ittifağı sil
   if (alliance.members.size === 0) {
     alliances.delete(alliance.id);
+    db.deleteAlliance(alliance.id);
     addAllianceFeed("DISBAND", alliance.name + " ittifaki dagildi", { allianceId:alliance.id });
   } else {
+    persistAlliance(alliance);
     addAllianceFeed("LEAVE", player.wallet.slice(0,8) + " ittifaktan ayrildi", { allianceId:alliance.id });
   }
+  db.savePlayer(player);
   emitState();
   res.json({ ok:true, player });
 });
@@ -640,6 +679,7 @@ app.post("/api/alliance/radio", rateLimited, (req,res)=>{
 
   const alliance = alliances.get(player.alliance_id);
   alliance.score += 1;
+  persistAlliance(alliance);
 
   const msg = alliance.name + ": " + command;
   addAllianceFeed("RADIO", msg, { allianceId:alliance.id, command, wallet:player.wallet, nickname:player.nickname, country:player.country_code });
@@ -703,6 +743,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   if (player.alliance_id && alliances.has(player.alliance_id)) {
     const alliance = alliances.get(player.alliance_id);
     alliance.score += contribGain;
+    persistAlliance(alliance);
   }
 
   if (target.hp <= 0 && !target.eliminated) {
@@ -713,6 +754,7 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
     for (const p of players.values()) {
       if (p.country_code === target.code) {
         p.deaths = (p.deaths || 0) + 1;
+        db.savePlayer(p);
       }
     }
     io.emit("country:eliminated", { country: target.code, by: player.wallet });
@@ -722,6 +764,11 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
       endRound();
     }
   }
+
+  // ── KALICILIK: saldıran oyuncu + iki ülke ──
+  db.savePlayer(player);
+  db.saveCountry(target);
+  db.saveCountry(own);
 
   const attack = {
     from_country: own.code,
@@ -758,6 +805,10 @@ app.post("/api/admin/reset", (req,res)=>{
   alliances.clear();
   allianceFeed.length=0;
   giftedWallets.clear();  // Hediye sayacını da sıfırla (tam reset)
+  // DB'yi de temizle ve ülkeleri sıfırlanmış haliyle yaz
+  db.wipeAll();
+  db.saveAllCountries(countries);
+  persistRoundState();
   emitState();
   res.json({ ok:true, message:"ABSWAR alliance beta reset complete" });
 });
@@ -822,4 +873,57 @@ io.on("connection", socket=>{
   });
 });
 
-server.listen(PORT, ()=>console.log("ABSWAR ALLIANCE BETA BACKEND RUNNING ON PORT " + PORT));
+// ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──
+async function bootstrap() {
+  await db.initSchema();
+  const loaded = await db.loadAll();
+
+  if (loaded) {
+    // Oyuncuları belleğe yükle
+    if (loaded.players && loaded.players.size > 0) {
+      for (const [k, v] of loaded.players) players.set(k, v);
+    }
+    // İttifakları yükle (members array → Set'e çevir)
+    if (loaded.alliances && loaded.alliances.size > 0) {
+      for (const [k, v] of loaded.alliances) {
+        v.members = new Set(Array.isArray(v.members) ? v.members : []);
+        alliances.set(k, v);
+      }
+    }
+    // Hediye sayacını yükle
+    if (loaded.gifted && loaded.gifted.size > 0) {
+      for (const w of loaded.gifted) giftedWallets.add(w);
+    }
+    // Ülke HP durumlarını yükle (DB'de varsa, mevcut bellek countries'i güncelle)
+    if (loaded.countries && loaded.countries.length > 0) {
+      for (const dbC of loaded.countries) {
+        const memC = countries.find(c => c.code === dbC.code);
+        if (memC) {
+          memC.hp = dbC.hp;
+          memC.max_hp = dbC.max_hp;
+          memC.eliminated = dbC.eliminated;
+        }
+      }
+    } else {
+      // DB'de ülke yoksa ilk kez — mevcut bellek durumunu DB'ye yaz
+      db.saveAllCountries(countries);
+    }
+    // Tur durumunu yükle
+    const gs = loaded.gameState || {};
+    if (gs.round) {
+      const r = gs.round;
+      if (r.roundNumber != null) roundNumber = r.roundNumber;
+      if (r.roundStatus) roundStatus = r.roundStatus;
+      if (r.roundStartTime) roundStartTime = r.roundStartTime;
+      if (r.roundEndTime) roundEndTime = r.roundEndTime;
+      if (r.lastRoundResult !== undefined) lastRoundResult = r.lastRoundResult;
+    }
+  }
+
+  server.listen(PORT, ()=>{
+    console.log("ABSWAR ALLIANCE BETA BACKEND RUNNING ON PORT " + PORT);
+    console.log("[DB] Durum:", db.dbEnabled ? "PostgreSQL aktif" : "Bellek modu");
+  });
+}
+
+bootstrap();

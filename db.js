@@ -3,20 +3,55 @@
 import pkg from "pg";
 const { Pool } = pkg;
 
-// Railway otomatik DATABASE_URL verir. Yoksa DB devre dışı (bellekte çalışır).
-const HAS_DB = !!process.env.DATABASE_URL;
+// ── BAĞLANTI YAPILANDIRMASI ──
+// Öncelik sırası:
+//  1) DATABASE_URL varsa onu kullan (en yaygın)
+//  2) Yoksa Railway'in tek tek verdiği parçalardan (PGHOST, PGUSER...) URL kur
+// Bu sayede ${{Postgres.DATABASE_URL}} referansı çözülmese bile,
+// parça değişkenler (PGHOST vb.) bağlanırsa DB çalışır.
+function buildPgConfig() {
+  // 1) Hazır URL
+  const url = process.env.DATABASE_URL;
+  if (url && url.startsWith("postgres")) {
+    return {
+      connectionString: url,
+      ssl: { rejectUnauthorized: false },
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    };
+  }
+
+  // 2) Parçalardan kur
+  const host = process.env.PGHOST || process.env.POSTGRES_HOST;
+  const port = process.env.PGPORT || process.env.POSTGRES_PORT || 5432;
+  const user = process.env.PGUSER || process.env.POSTGRES_USER;
+  const password = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD;
+  const database = process.env.PGDATABASE || process.env.POSTGRES_DB;
+
+  if (host && user && password && database) {
+    return {
+      host, port: Number(port), user, password, database,
+      ssl: { rejectUnauthorized: false },
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    };
+  }
+
+  // Hiçbiri yoksa null → bellek modu
+  return null;
+}
+
+const pgConfig = buildPgConfig();
+const HAS_DB = !!pgConfig;
 
 let pool = null;
 if (HAS_DB) {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL.includes("railway") || process.env.PGSSL === "true"
-      ? { rejectUnauthorized: false }
-      : false,
-    max: 10,
-    idleTimeoutMillis: 30000,
-  });
+  pool = new Pool(pgConfig);
   pool.on("error", (err) => console.error("[DB] Pool error:", err.message));
+  console.log("[DB] Bağlantı yapılandırması hazır (" +
+    (process.env.DATABASE_URL ? "DATABASE_URL" : "PG parçaları") + ")");
 }
 
 export const dbEnabled = HAS_DB;
@@ -24,10 +59,14 @@ export const dbEnabled = HAS_DB;
 // ── ŞEMA OLUŞTURMA ──
 export async function initSchema() {
   if (!HAS_DB) {
-    console.log("[DB] DATABASE_URL yok — kalıcılık DEVRE DIŞI (bellekte çalışıyor)");
+    console.log("[DB] Bağlantı bilgisi yok (ne DATABASE_URL ne PG parçaları) — kalıcılık DEVRE DIŞI, bellekte çalışıyor");
     return false;
   }
   try {
+    // Önce bağlantıyı test et (asılı kalmasın diye)
+    await pool.query("SELECT 1");
+    console.log("[DB] PostgreSQL bağlantısı başarılı ✅");
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS players (
         wallet        TEXT PRIMARY KEY,

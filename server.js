@@ -737,8 +737,9 @@ app.post("/api/game/attack", rateLimited, (req,res)=>{
   const damage = Math.max(1, Math.round(1 + (attackerMetal/100) - (defenderUranium/100)));
 
   target.hp = Math.max(0, target.hp - damage);
-  // Not: Saldıran ülkenin HP'si ARTMAZ. (Eski kodda own.hp += damage vardı,
-  // bu yüzden çok saldıran ülkeler 100.000 HP'ye çıkıyordu — kaldırıldı.)
+  // Saldıran ülkenin HP'si artar ama 100.000 tavanını geçemez (sınırsız büyümeyi önler)
+  const HP_CAP = 100000;
+  own.hp = Math.min(HP_CAP, own.hp + damage);
 
   // ── RÜTBE BONUSU ──
   const rank = getRank(player.contribution);

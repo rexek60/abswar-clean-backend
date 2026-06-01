@@ -1,10 +1,13 @@
-// v2 deploy
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import http from "http";
 import { Server } from "socket.io";
 import * as db from "./db.js";
+
+// ═══════════════════════════════════════════════
+console.log("🟢🟢🟢 ABSWAR SERVER v5 — BOOTSTRAP + DB + ADMIN — BUILD CHECK 🟢🟢🟢");
+// ═══════════════════════════════════════════════
 
 dotenv.config();
 

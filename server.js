@@ -411,6 +411,10 @@ function authRequired(req, res, next) {
 // --- CHAIN PAYMENT VERIFICATION ---
 const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
 const BUY_AMMO_SELECTOR = "0x499eb3de";
+const ERC1271_MAGIC_VALUE = "0x1626ba7e";
+const signatureInterface = new ethers.Interface([
+  "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)"
+]);
 const ammoInterface = new ethers.Interface([
   "event AmmoPurchased(address indexed buyer, uint256 amount, uint256 ethPaid)"
 ]);
@@ -427,6 +431,26 @@ function apiError(code, message, status = 400) {
   e.code = code;
   e.status = status;
   return e;
+}
+
+async function verifyWalletMessage(wallet, message, signature) {
+  try {
+    if (normalizeWallet(ethers.verifyMessage(message, signature)) === wallet) return true;
+  } catch {}
+
+  try {
+    const code = await provider.getCode(wallet);
+    if (!code || code === "0x") return false;
+    const data = signatureInterface.encodeFunctionData("isValidSignature", [
+      ethers.hashMessage(message),
+      signature
+    ]);
+    const result = await provider.call({ to: wallet, data });
+    const [magicValue] = signatureInterface.decodeFunctionResult("isValidSignature", result);
+    return String(magicValue).toLowerCase() === ERC1271_MAGIC_VALUE;
+  } catch {
+    return false;
+  }
 }
 
 async function verifyAmmoPurchase({ wallet, pack, txHash }) {
@@ -668,7 +692,8 @@ app.get("/health", (_req,res)=>res.json({
   onlinePlayers,
   network: NETWORK,
   chainId: CHAIN.chainId,
-  paymentVerification: true
+  paymentVerification: true,
+  walletAuth: "eip1271"
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
 
@@ -682,7 +707,7 @@ app.post("/api/auth/challenge", rateLimited, (req,res)=>{
   res.json({ ok:true, wallet, message, expiresAt });
 });
 
-app.post("/api/auth/verify", rateLimited, (req,res)=>{
+app.post("/api/auth/verify", rateLimited, async (req,res)=>{
   const wallet = normalizeWallet(req.body && req.body.wallet);
   const signature = req.body && req.body.signature;
   const message = req.body && req.body.message;
@@ -698,8 +723,7 @@ app.post("/api/auth/verify", rateLimited, (req,res)=>{
     return res.status(401).json({ code:"CHALLENGE_MISMATCH", error:"Giris mesaji eslesmiyor" });
   }
   try {
-    const recovered = normalizeWallet(ethers.verifyMessage(message, signature));
-    if (recovered !== wallet) {
+    if (!await verifyWalletMessage(wallet, message, signature)) {
       return res.status(401).json({ code:"SIGNATURE_MISMATCH", error:"Imza cuzdanla eslesmiyor" });
     }
     authChallenges.delete(wallet);

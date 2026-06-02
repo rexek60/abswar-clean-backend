@@ -109,6 +109,17 @@ export async function initSchema() {
       CREATE TABLE IF NOT EXISTS gifted_wallets (
         wallet TEXT PRIMARY KEY
       );
+
+      CREATE TABLE IF NOT EXISTS purchases (
+        tx_hash      TEXT PRIMARY KEY,
+        wallet       TEXT NOT NULL,
+        pack         INTEGER NOT NULL,
+        bullets      INTEGER NOT NULL,
+        value_wei    TEXT NOT NULL,
+        chain_id     INTEGER NOT NULL,
+        block_number BIGINT,
+        created_at   BIGINT
+      );
     `);
 
     // ── Migration'lar — mevcut tablolara eksik sütun/tablo ekle ──
@@ -285,6 +296,32 @@ export function addGiftedWallet(wallet) {
   if (!HAS_DB) return;
   pool.query("INSERT INTO gifted_wallets (wallet) VALUES ($1) ON CONFLICT DO NOTHING", [wallet])
     .catch(e => console.error("[DB] addGiftedWallet:", e.message));
+}
+
+export async function recordPurchase(purchase) {
+  if (!HAS_DB || !purchase) return null;
+  try {
+    const r = await pool.query(
+      `INSERT INTO purchases (tx_hash,wallet,pack,bullets,value_wei,chain_id,block_number,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (tx_hash) DO NOTHING
+       RETURNING tx_hash`,
+      [
+        purchase.txHash,
+        purchase.wallet,
+        purchase.pack,
+        purchase.bullets,
+        purchase.valueWei,
+        purchase.chainId,
+        purchase.blockNumber || null,
+        purchase.createdAt || Date.now()
+      ]
+    );
+    return r.rowCount === 1;
+  } catch (e) {
+    console.error("[DB] recordPurchase:", e.message);
+    throw e;
+  }
 }
 
 // Tam reset (admin)

@@ -3,6 +3,8 @@ import cors from "cors";
 import dotenv from "dotenv";
 import http from "http";
 import { Server } from "socket.io";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { ethers } from "ethers";
 import * as db from "./db.js";
 
 // ═══════════════════════════════════════════════
@@ -11,15 +13,61 @@ console.log("🟢🟢🟢 ABSWAR SERVER v5 — BOOTSTRAP + DB + ADMIN — BUILD 
 
 dotenv.config();
 
+const NETWORK = (process.env.ABSWAR_NETWORK || process.env.NETWORK || "testnet").toLowerCase();
+const IS_MAINNET = NETWORK === "mainnet";
+const ABSTRACT_CHAINS = {
+  testnet: {
+    name: "Abstract Testnet",
+    chainId: 11124,
+    rpcUrl: "https://api.testnet.abs.xyz",
+    explorerUrl: "https://sepolia.abscan.org",
+    contractAddress: "0x325b18816734210e9fEbAA0516030A8Ec74bE3d4"
+  },
+  mainnet: {
+    name: "Abstract",
+    chainId: 2741,
+    rpcUrl: "https://api.mainnet.abs.xyz",
+    explorerUrl: "https://abscan.org",
+    contractAddress: ""
+  }
+};
+const CHAIN = ABSTRACT_CHAINS[NETWORK] || ABSTRACT_CHAINS.testnet;
+const ABSWAR_RPC_URL = process.env.ABSWAR_RPC_URL || CHAIN.rpcUrl;
+const ABSWAR_CONTRACT_ADDRESS = process.env.ABSWAR_CONTRACT_ADDRESS || CHAIN.contractAddress;
+const AUTH_SECRET = process.env.AUTH_SECRET || randomBytes(32).toString("hex");
+const AUTH_TTL_MS = Number(process.env.AUTH_TTL_MS || 24 * 60 * 60 * 1000);
+const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 5 * 60 * 1000);
+const ALLOW_DEMO_PURCHASES = process.env.ALLOW_DEMO_PURCHASES === "true" && !IS_MAINNET;
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
+  "https://abswar.xyz,https://www.abswar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+if (!process.env.AUTH_SECRET) {
+  console.warn("[AUTH] AUTH_SECRET missing; sessions will reset on deploy/restart.");
+  if (IS_MAINNET) {
+    throw new Error("AUTH_SECRET is required when ABSWAR_NETWORK=mainnet");
+  }
+}
+if (IS_MAINNET && !ethers.isAddress(ABSWAR_CONTRACT_ADDRESS)) {
+  throw new Error("ABSWAR_CONTRACT_ADDRESS is required when ABSWAR_NETWORK=mainnet");
+}
+
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
 
-app.use(cors({ origin: "*", credentials: true }));
-app.use(express.json());
+function corsOrigin(origin, callback) {
+  if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+  return callback(new Error("Origin not allowed"));
+}
+
+app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(express.json({ limit: "64kb" }));
 
 const io = new Server(server, {
-  cors: { origin: "*", credentials: true }
+  cors: { origin: ALLOWED_ORIGINS, credentials: true }
 });
 
 let onlinePlayers = 0;
@@ -278,21 +326,196 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+// --- AUTH / WALLET OWNERSHIP ---
+const authChallenges = new Map();
+
+function normalizeWallet(w) {
+  if (typeof w !== "string") return null;
+  try {
+    if (!ethers.isAddress(w)) return null;
+    return ethers.getAddress(w).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function safeEq(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+function base64url(input) {
+  return Buffer.from(input).toString("base64url");
+}
+
+function signTokenPayload(payload) {
+  return createHmac("sha256", AUTH_SECRET).update(payload).digest("base64url");
+}
+
+function issueSessionToken(wallet) {
+  const exp = Date.now() + AUTH_TTL_MS;
+  const payload = base64url(JSON.stringify({
+    wallet,
+    exp,
+    iat: Date.now(),
+    sid: randomBytes(12).toString("hex")
+  }));
+  return { token: `${payload}.${signTokenPayload(payload)}`, expiresAt: exp };
+}
+
+function verifySessionToken(token) {
+  if (typeof token !== "string" || !token.includes(".")) return null;
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature || !safeEq(signature, signTokenPayload(payload))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!data.exp || Date.now() > data.exp) return null;
+    const wallet = normalizeWallet(data.wallet);
+    if (!wallet) return null;
+    return { wallet, expiresAt: data.exp };
+  } catch {
+    return null;
+  }
+}
+
+function makeChallengeMessage(wallet, nonce, expiresAt) {
+  return [
+    "ABSWAR wallet login",
+    "",
+    `Wallet: ${ethers.getAddress(wallet)}`,
+    `Network: ${CHAIN.name}`,
+    `Nonce: ${nonce}`,
+    `Expires: ${new Date(expiresAt).toISOString()}`,
+    "",
+    "Only sign this message on abswar.xyz. This does not authorize a blockchain transaction."
+  ].join("\n");
+}
+
+function authRequired(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  const session = verifySessionToken(token);
+  if (!session) {
+    return res.status(401).json({ code:"AUTH_REQUIRED", error:"Cuzdan imzasi gerekli" });
+  }
+  const bodyWallet = normalizeWallet(req.body && req.body.wallet);
+  if (bodyWallet && bodyWallet !== session.wallet) {
+    return res.status(403).json({ code:"WALLET_MISMATCH", error:"Oturum cuzdanla eslesmiyor" });
+  }
+  req.wallet = session.wallet;
+  if (req.body) req.body.wallet = session.wallet;
+  next();
+}
+
+// --- CHAIN PAYMENT VERIFICATION ---
+const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
+const BUY_AMMO_SELECTOR = "0x499eb3de";
+const ammoInterface = new ethers.Interface([
+  "event AmmoPurchased(address indexed buyer, uint256 amount, uint256 ethPaid)"
+]);
+const AMMO_PACKS = {
+  100:  { bullets:100,    valueWei: ethers.parseEther("0.001") },
+  500:  { bullets:1000,   valueWei: ethers.parseEther("0.01") },
+  2000: { bullets:10000,  valueWei: ethers.parseEther("0.1") },
+  9999: { bullets:100000, valueWei: ethers.parseEther("1.0") }
+};
+const memoryPurchases = new Set();
+
+function apiError(code, message, status = 400) {
+  const e = new Error(message);
+  e.code = code;
+  e.status = status;
+  return e;
+}
+
+async function verifyAmmoPurchase({ wallet, pack, txHash }) {
+  const cfg = AMMO_PACKS[pack];
+  if (!cfg) throw apiError("INVALID_PACK", "Gecersiz paket");
+  if (!ethers.isAddress(ABSWAR_CONTRACT_ADDRESS)) {
+    throw apiError("CONTRACT_NOT_CONFIGURED", "Kontrat adresi ayarli degil", 503);
+  }
+  if (!ethers.isHexString(txHash, 32)) {
+    throw apiError("INVALID_TX_HASH", "Gecersiz islem hash'i");
+  }
+
+  const network = await provider.getNetwork();
+  if (Number(network.chainId) !== CHAIN.chainId) {
+    throw apiError("WRONG_RPC_CHAIN", "RPC zinciri beklenen Abstract agi degil", 503);
+  }
+
+  const [receipt, tx] = await Promise.all([
+    provider.getTransactionReceipt(txHash),
+    provider.getTransaction(txHash)
+  ]);
+  if (!receipt || !tx) throw apiError("TX_PENDING", "Islem henuz onaylanmadi", 202);
+  if (receipt.status !== 1) throw apiError("TX_FAILED", "Blockchain islemi basarisiz");
+  if (normalizeWallet(tx.from) !== wallet) throw apiError("TX_FROM_MISMATCH", "Islem farkli cuzdan tarafindan gonderildi");
+  if (normalizeWallet(tx.to) !== normalizeWallet(ABSWAR_CONTRACT_ADDRESS)) {
+    throw apiError("TX_TO_MISMATCH", "Islem ABSWAR kontratina gitmiyor");
+  }
+  if (String(tx.data || "").toLowerCase() !== BUY_AMMO_SELECTOR) {
+    throw apiError("TX_METHOD_MISMATCH", "Islem buyAmmo() cagrisi degil");
+  }
+  if (tx.value !== cfg.valueWei) {
+    throw apiError("TX_VALUE_MISMATCH", "Islem tutari secilen paketle eslesmiyor");
+  }
+
+  const contractAddress = normalizeWallet(ABSWAR_CONTRACT_ADDRESS);
+  const purchaseEvent = receipt.logs
+    .filter(log => normalizeWallet(log.address) === contractAddress)
+    .map(log => {
+      try { return ammoInterface.parseLog(log); } catch { return null; }
+    })
+    .find(log => log && log.name === "AmmoPurchased");
+
+  if (!purchaseEvent) throw apiError("AMMO_EVENT_MISSING", "Kontrat satin alma eventi bulunamadi");
+  if (normalizeWallet(purchaseEvent.args.buyer) !== wallet) {
+    throw apiError("AMMO_EVENT_BUYER_MISMATCH", "Kontrat eventi cuzdanla eslesmiyor");
+  }
+  if (purchaseEvent.args.ethPaid !== cfg.valueWei) {
+    throw apiError("AMMO_EVENT_VALUE_MISMATCH", "Kontrat eventi paket tutariyla eslesmiyor");
+  }
+
+  return {
+    txHash: txHash.toLowerCase(),
+    wallet,
+    pack,
+    bullets: cfg.bullets,
+    valueWei: cfg.valueWei.toString(),
+    chainId: CHAIN.chainId,
+    blockNumber: receipt.blockNumber,
+    createdAt: Date.now()
+  };
+}
+
+async function recordPurchaseOnce(purchase) {
+  if (memoryPurchases.has(purchase.txHash)) return false;
+  if (db.dbEnabled) {
+    const inserted = await db.recordPurchase(purchase);
+    if (!inserted) return false;
+  } else if (IS_MAINNET) {
+    throw apiError("DB_REQUIRED", "Mainnet odeme kaydi icin PostgreSQL gerekli", 503);
+  }
+  memoryPurchases.add(purchase.txHash);
+  return true;
+}
+
 // ── KÖTÜYE KULLANIM KORUMASI ─────────────────────
 const rateLimits = new Map(); // wallet -> { count, windowStart }
 const RATE_LIMIT_WINDOW = 10000; // 10 saniye
 const RATE_LIMIT_MAX = 30;       // 10 saniyede max 30 istek
 const ATTACK_COOLDOWN = 250;     // saldırılar arası min 250ms
 
-function checkRateLimit(wallet) {
+function checkRateLimit(key) {
   const now = Date.now();
-  const r = rateLimits.get(wallet) || { count:0, windowStart:now };
+  const r = rateLimits.get(key) || { count:0, windowStart:now };
   if (now - r.windowStart > RATE_LIMIT_WINDOW) {
     r.count = 0;
     r.windowStart = now;
   }
   r.count++;
-  rateLimits.set(wallet, r);
+  rateLimits.set(key, r);
   return r.count <= RATE_LIMIT_MAX;
 }
 
@@ -314,20 +537,24 @@ function isCleanText(text) {
 }
 
 function validWallet(w) {
-  return typeof w === 'string' && /^0x[a-f0-9]{40}$/i.test(w) || w === 'demo-player' || (typeof w === 'string' && w.length > 0 && w.length < 50);
+  return !!normalizeWallet(w);
 }
 
 // Middleware
 function rateLimited(req, res, next) {
-  const wallet = (req.body && req.body.wallet) || 'anon';
-  if (!checkRateLimit(String(wallet).toLowerCase())) {
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "anon").split(",")[0].trim();
+  const wallet = req.wallet || normalizeWallet(req.body && req.body.wallet);
+  const key = wallet || `ip:${ip}`;
+  const keys = [...new Set([key, `ip:${ip}`])];
+  if (!keys.every(checkRateLimit)) {
     return res.status(429).json({ code:'RATE_LIMITED', error: 'Çok fazla istek. Lütfen yavaşla.' });
   }
   next();
 }
 
 function getPlayer(wallet) {
-  const id = String(wallet || "demo-player").toLowerCase();
+  const id = normalizeWallet(wallet);
+  if (!id) throw apiError("INVALID_WALLET", "Gecersiz cuzdan");
   if (!players.has(id)) {
     players.set(id, {
       wallet:id,
@@ -432,12 +659,60 @@ function addAllianceFeed(type, message, payload={}) {
 }
 
 app.get("/", (_req,res)=>res.json({ ok:true, name:"ABSWAR Alliance Beta Backend" }));
-app.get("/health", (_req,res)=>res.json({ ok:true, realtime:true, alliance:true, noNFT:true, noToken:true, onlinePlayers }));
+app.get("/health", (_req,res)=>res.json({
+  ok:true,
+  realtime:true,
+  alliance:true,
+  noNFT:true,
+  noToken:true,
+  onlinePlayers,
+  network: NETWORK,
+  chainId: CHAIN.chainId,
+  paymentVerification: true
+}));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
 
-app.post("/api/player/connect", (req,res)=>{
+app.post("/api/auth/challenge", rateLimited, (req,res)=>{
+  const wallet = normalizeWallet(req.body && req.body.wallet);
+  if (!wallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+  const nonce = randomBytes(16).toString("hex");
+  const expiresAt = Date.now() + CHALLENGE_TTL_MS;
+  const message = makeChallengeMessage(wallet, nonce, expiresAt);
+  authChallenges.set(wallet, { nonce, message, expiresAt });
+  res.json({ ok:true, wallet, message, expiresAt });
+});
+
+app.post("/api/auth/verify", rateLimited, (req,res)=>{
+  const wallet = normalizeWallet(req.body && req.body.wallet);
+  const signature = req.body && req.body.signature;
+  const message = req.body && req.body.message;
+  if (!wallet || typeof signature !== "string" || typeof message !== "string") {
+    return res.status(400).json({ code:"INVALID_AUTH_PAYLOAD", error:"Eksik imza bilgisi" });
+  }
+  const challenge = authChallenges.get(wallet);
+  if (!challenge || challenge.expiresAt < Date.now()) {
+    authChallenges.delete(wallet);
+    return res.status(401).json({ code:"CHALLENGE_EXPIRED", error:"Giris imzasi suresi doldu" });
+  }
+  if (message !== challenge.message) {
+    return res.status(401).json({ code:"CHALLENGE_MISMATCH", error:"Giris mesaji eslesmiyor" });
+  }
+  try {
+    const recovered = normalizeWallet(ethers.verifyMessage(message, signature));
+    if (recovered !== wallet) {
+      return res.status(401).json({ code:"SIGNATURE_MISMATCH", error:"Imza cuzdanla eslesmiyor" });
+    }
+    authChallenges.delete(wallet);
+    const session = issueSessionToken(wallet);
+    res.json({ ok:true, wallet, token:session.token, expiresAt:session.expiresAt });
+  } catch {
+    return res.status(401).json({ code:"INVALID_SIGNATURE", error:"Imza dogrulanamadi" });
+  }
+});
+
+app.post("/api/player/connect", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
-  const id = String(req.body.wallet).toLowerCase();
+  const id = req.wallet;
   const isNewPlayer = !players.has(id);
   const player = getPlayer(req.body.wallet);
 
@@ -460,7 +735,7 @@ app.post("/api/player/connect", (req,res)=>{
   res.json({ ok:true, player, gift, giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size) });
 });
 
-app.post("/api/player/choose-country", (req,res)=>{
+app.post("/api/player/choose-country", authRequired, rateLimited, (req,res)=>{
   const wallet = req.body.wallet;
   const countryCode = String(req.body.countryCode || "").toUpperCase();
   const player = getPlayer(wallet);
@@ -481,7 +756,7 @@ app.post("/api/player/choose-country", (req,res)=>{
 });
 
 // Nickname ayarlama (oyun başlangıcında bir kez veya değiştirme)
-app.post("/api/player/nickname", rateLimited, (req,res)=>{
+app.post("/api/player/nickname", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const nickname = String(req.body.nickname || "").trim().slice(0,16);
@@ -504,7 +779,7 @@ app.post("/api/player/nickname", rateLimited, (req,res)=>{
 });
 
 // Radar yükseltme — 5 mermi karşılığı seviye atlat
-app.post("/api/player/radar-upgrade", rateLimited, (req,res)=>{
+app.post("/api/player/radar-upgrade", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   if (!player.radar_level) player.radar_level = 3;
@@ -518,7 +793,7 @@ app.post("/api/player/radar-upgrade", rateLimited, (req,res)=>{
 });
 
 // Kaynak üretimi — 1 mermi → seviye +10. %100'de bonus alır ve sıfırlanır.
-app.post("/api/player/produce-resource", rateLimited, (req,res)=>{
+app.post("/api/player/produce-resource", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const which = String(req.body.resource || "").toLowerCase();
@@ -560,7 +835,34 @@ app.post("/api/player/produce-resource", rateLimited, (req,res)=>{
   res.json({ ok:true, player, bonus });
 });
 
-app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
+app.post("/api/market/buy", authRequired, rateLimited, async (req,res)=>{
+  try {
+    const wallet = req.wallet;
+    const pack = Number(req.body.pack || 0);
+    const txHash = String(req.body.txHash || "");
+    const purchase = await verifyAmmoPurchase({ wallet, pack, txHash });
+    const inserted = await recordPurchaseOnce(purchase);
+    if (!inserted) {
+      return res.status(409).json({ code:"TX_ALREADY_USED", error:"Bu blockchain islemi daha once kullanildi" });
+    }
+
+    const player = getPlayer(wallet);
+    player.bullets += purchase.bullets;
+    db.savePlayer(player);
+
+    io.emit("market:purchase", { wallet:player.wallet, pack, bullets:purchase.bullets, txHash:purchase.txHash });
+    emitState();
+    res.json({ ok:true, player, added:purchase.bullets, txHash:purchase.txHash, blockNumber:purchase.blockNumber });
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status).json({ code:e.code || "BUY_FAILED", error:e.message || "Satin alma dogrulanamadi" });
+  }
+});
+
+app.post("/api/market/buy-demo", authRequired, rateLimited, (req,res)=>{
+  if (!ALLOW_DEMO_PURCHASES) {
+    return res.status(410).json({ code:"PAYMENT_VERIFICATION_REQUIRED", error:"Demo satin alma kapali; blockchain islemi gerekli" });
+  }
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const pack = Number(req.body.pack || 1);
@@ -574,7 +876,7 @@ app.post("/api/market/buy-demo", rateLimited, (req,res)=>{
   res.json({ ok:true, player, added:bullets });
 });
 
-app.post("/api/alliance/create", rateLimited, (req,res)=>{
+app.post("/api/alliance/create", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const name = String(req.body.name || "").trim().slice(0,24);
@@ -616,7 +918,7 @@ app.post("/api/alliance/create", rateLimited, (req,res)=>{
   res.json({ ok:true, alliance:publicAlliance(alliance), player });
 });
 
-app.post("/api/alliance/join", rateLimited, (req,res)=>{
+app.post("/api/alliance/join", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const allianceId = String(req.body.allianceId || "");
@@ -639,7 +941,7 @@ app.post("/api/alliance/join", rateLimited, (req,res)=>{
   res.json({ ok:true, alliance:publicAlliance(alliance), player });
 });
 
-app.post("/api/alliance/leave", rateLimited, (req,res)=>{
+app.post("/api/alliance/leave", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   if (!player.alliance_id) return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"İttifakta değilsin" });
@@ -672,7 +974,7 @@ app.post("/api/alliance/leave", rateLimited, (req,res)=>{
   res.json({ ok:true, player });
 });
 
-app.post("/api/alliance/radio", rateLimited, (req,res)=>{
+app.post("/api/alliance/radio", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
   const command = String(req.body.command || "").toUpperCase();
@@ -693,7 +995,7 @@ app.post("/api/alliance/radio", rateLimited, (req,res)=>{
   res.json({ ok:true, message:msg });
 });
 
-app.post("/api/game/attack", rateLimited, (req,res)=>{
+app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
   const targetCountry = String(req.body.targetCountry || "").toUpperCase().slice(0,3);

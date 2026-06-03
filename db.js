@@ -324,6 +324,28 @@ export async function recordPurchase(purchase) {
   }
 }
 
+export async function loadPurchaseTotals() {
+  if (!HAS_DB) return { purchaseCount:0, totalBullets:0, totalWei:"0" };
+  try {
+    const r = await pool.query(`
+      SELECT
+        COUNT(*)::int AS purchase_count,
+        COALESCE(SUM(bullets), 0)::bigint::text AS total_bullets,
+        COALESCE(SUM(value_wei::numeric), 0)::text AS total_wei
+      FROM purchases
+    `);
+    const row = r.rows[0] || {};
+    return {
+      purchaseCount: Number(row.purchase_count) || 0,
+      totalBullets: Number(row.total_bullets) || 0,
+      totalWei: String(row.total_wei || "0").split(".")[0]
+    };
+  } catch (e) {
+    console.error("[DB] loadPurchaseTotals:", e.message);
+    return { purchaseCount:0, totalBullets:0, totalWei:"0" };
+  }
+}
+
 // Tam reset (admin)
 export async function wipeAll() {
   if (!HAS_DB) return;

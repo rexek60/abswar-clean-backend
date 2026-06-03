@@ -53,6 +53,9 @@ if (!process.env.AUTH_SECRET) {
 if (IS_MAINNET && !ethers.isAddress(ABSWAR_CONTRACT_ADDRESS)) {
   throw new Error("ABSWAR_CONTRACT_ADDRESS is required when ABSWAR_NETWORK=mainnet");
 }
+if (IS_MAINNET && !process.env.ADMIN_TOKEN) {
+  throw new Error("ADMIN_TOKEN is required when ABSWAR_NETWORK=mainnet");
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -339,6 +342,10 @@ function normalizeWallet(w) {
   }
 }
 
+const ADMIN_OWNER_WALLET = normalizeWallet(
+  process.env.ADMIN_OWNER_WALLET || "0x9C5e9dB5836e9c95be7cBec023D543c36E865B5B"
+);
+
 function safeEq(a, b) {
   const ab = Buffer.from(String(a));
   const bb = Buffer.from(String(b));
@@ -425,6 +432,37 @@ const AMMO_PACKS = {
   9999: { bullets:100000, valueWei: ethers.parseEther("1.0") }
 };
 const memoryPurchases = new Set();
+let purchaseTotals = { purchaseCount:0, totalBullets:0, totalWei:"0" };
+
+function setPurchaseTotals(totals={}) {
+  purchaseTotals = {
+    purchaseCount: Number(totals.purchaseCount) || 0,
+    totalBullets: Number(totals.totalBullets) || 0,
+    totalWei: String(totals.totalWei || "0")
+  };
+}
+
+function addPurchaseToTotals(purchase) {
+  const currentWei = BigInt(purchaseTotals.totalWei || "0");
+  purchaseTotals = {
+    purchaseCount: purchaseTotals.purchaseCount + 1,
+    totalBullets: purchaseTotals.totalBullets + (Number(purchase.bullets) || 0),
+    totalWei: (currentWei + BigInt(purchase.valueWei || "0")).toString()
+  };
+}
+
+function economyState() {
+  const totalWei = BigInt(purchaseTotals.totalWei || "0");
+  const rewardPoolWei = (totalWei * 70n) / 100n;
+  return {
+    purchaseCount: purchaseTotals.purchaseCount,
+    totalBullets: purchaseTotals.totalBullets,
+    totalWei: totalWei.toString(),
+    totalEth: ethers.formatEther(totalWei),
+    rewardPoolWei: rewardPoolWei.toString(),
+    rewardPoolEth: ethers.formatEther(rewardPoolWei)
+  };
+}
 
 function apiError(code, message, status = 400) {
   const e = new Error(message);
@@ -522,6 +560,7 @@ async function recordPurchaseOnce(purchase) {
     throw apiError("DB_REQUIRED", "Mainnet odeme kaydi icin PostgreSQL gerekli", 503);
   }
   memoryPurchases.add(purchase.txHash);
+  addPurchaseToTotals(purchase);
   return true;
 }
 
@@ -629,6 +668,76 @@ function getNextRank(contribution) {
   return null; // En yüksek rütbedeyiz
 }
 
+// --- RANK NFT CLAIMS ---
+const RANK_NFT_CONTRACT_ADDRESS = process.env.RANK_NFT_CONTRACT_ADDRESS || "";
+const RANK_NFT_SIGNER_PRIVATE_KEY = process.env.RANK_NFT_SIGNER_PRIVATE_KEY || process.env.SIGNER_PRIVATE_KEY || "";
+const RANK_NFT_CLAIM_TTL_MS = Number(process.env.RANK_NFT_CLAIM_TTL_MS || 10 * 60 * 1000);
+const rankNftInterface = new ethers.Interface([
+  "function hasRankNFT(address player,uint8 rank) view returns (bool)"
+]);
+
+let rankNftSigner = null;
+if (RANK_NFT_SIGNER_PRIVATE_KEY) {
+  try {
+    rankNftSigner = new ethers.Wallet(RANK_NFT_SIGNER_PRIVATE_KEY);
+    console.log("[RANK NFT] signer configured:", rankNftSigner.address);
+  } catch {
+    console.warn("[RANK NFT] invalid signer private key; NFT claim signatures disabled.");
+  }
+}
+
+function rankNftConfigured() {
+  return !!rankNftSigner && ethers.isAddress(RANK_NFT_CONTRACT_ADDRESS);
+}
+
+function publicRank(rank, index) {
+  return {
+    index,
+    name: rank.name,
+    icon: rank.icon,
+    min: rank.min,
+    bonusPct: Math.round((rank.bonus || 0) * 100)
+  };
+}
+
+function rankNftPublicState() {
+  return {
+    enabled: rankNftConfigured(),
+    contractAddress: ethers.isAddress(RANK_NFT_CONTRACT_ADDRESS) ? ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS) : null,
+    signerAddress: rankNftSigner ? rankNftSigner.address : null,
+    claimTtlMs: RANK_NFT_CLAIM_TTL_MS,
+    ranks: RANKS.map(publicRank)
+  };
+}
+
+async function hasMintedRankNft(wallet, rankIndex) {
+  if (!rankNftConfigured()) return false;
+  try {
+    const data = rankNftInterface.encodeFunctionData("hasRankNFT", [ethers.getAddress(wallet), rankIndex]);
+    const result = await provider.call({ to: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS), data });
+    const [minted] = rankNftInterface.decodeFunctionResult("hasRankNFT", result);
+    return !!minted;
+  } catch {
+    return false;
+  }
+}
+
+async function createRankNftSignature(wallet, rankIndex) {
+  const deadline = Math.floor((Date.now() + RANK_NFT_CLAIM_TTL_MS) / 1000);
+  const digest = ethers.solidityPackedKeccak256(
+    ["address", "uint256", "address", "uint8", "uint256"],
+    [
+      ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+      CHAIN.chainId,
+      ethers.getAddress(wallet),
+      rankIndex,
+      deadline
+    ]
+  );
+  const signature = await rankNftSigner.signMessage(ethers.getBytes(digest));
+  return { deadline, digest, signature };
+}
+
 function publicAlliance(a) {
   return {
     id:a.id,
@@ -654,6 +763,7 @@ function state() {
     leaderboard,
     alliances: allianceList,
     allianceFeed,
+    economy: economyState(),
     round: {
       number: roundNumber,
       status: roundStatus,
@@ -665,9 +775,10 @@ function state() {
     war:{
       total_attacks: recentAttacks.length,
       countries_left: countries.filter(c=>!c.eliminated).length,
-      nft:false,
+      nft:rankNftConfigured(),
       token:false
-    }
+    },
+    rankNft: rankNftPublicState()
   };
 }
 
@@ -687,13 +798,14 @@ app.get("/health", (_req,res)=>res.json({
   ok:true,
   realtime:true,
   alliance:true,
-  noNFT:true,
+  noNFT:!rankNftConfigured(),
   noToken:true,
   onlinePlayers,
   network: NETWORK,
   chainId: CHAIN.chainId,
   paymentVerification: true,
-  walletAuth: "eip1271"
+  walletAuth: "eip1271",
+  rankNft: rankNftPublicState()
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
 
@@ -731,6 +843,63 @@ app.post("/api/auth/verify", rateLimited, async (req,res)=>{
     res.json({ ok:true, wallet, token:session.token, expiresAt:session.expiresAt });
   } catch {
     return res.status(401).json({ code:"INVALID_SIGNATURE", error:"Imza dogrulanamadi" });
+  }
+});
+
+app.get("/api/nft/rank/status", (_req,res) => {
+  res.json({ ok:true, rankNft: rankNftPublicState() });
+});
+
+app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) => {
+  try {
+    if (!rankNftConfigured()) {
+      return res.status(503).json({
+        code:"RANK_NFT_NOT_READY",
+        error:"Rutbe NFT kontrati veya signer henuz ayarlanmadi",
+        rankNft: rankNftPublicState()
+      });
+    }
+
+    const wallet = req.wallet;
+    const rankIndex = Number(req.body && req.body.rank);
+    if (!Number.isInteger(rankIndex) || rankIndex < 0 || rankIndex >= RANKS.length) {
+      return res.status(400).json({ code:"INVALID_RANK", error:"Gecersiz rutbe" });
+    }
+
+    const player = getPlayer(wallet);
+    const rank = RANKS[rankIndex];
+    const contribution = Number(player.contribution || 0);
+    if (contribution < rank.min) {
+      return res.status(403).json({
+        code:"RANK_NOT_EARNED",
+        error:`Bu rutbe icin ${rank.min} katkı gerekir`,
+        contribution,
+        required: rank.min,
+        rank: publicRank(rank, rankIndex)
+      });
+    }
+
+    if (await hasMintedRankNft(wallet, rankIndex)) {
+      return res.status(409).json({
+        code:"RANK_NFT_ALREADY_MINTED",
+        error:"Bu rutbe NFT'si daha once alinmis",
+        rank: publicRank(rank, rankIndex)
+      });
+    }
+
+    const claim = await createRankNftSignature(wallet, rankIndex);
+    res.json({
+      ok:true,
+      wallet,
+      rank: publicRank(rank, rankIndex),
+      chainId: CHAIN.chainId,
+      contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+      signerAddress: rankNftSigner.address,
+      deadline: claim.deadline,
+      signature: claim.signature
+    });
+  } catch (e) {
+    res.status(500).json({ code:"RANK_NFT_SIGNATURE_FAILED", error:e.message || "NFT imzasi uretilemedi" });
   }
 });
 
@@ -1126,12 +1295,11 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   res.json({ ok:true, attack, player, newHp: target.hp, damage:damage });
 });
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ("abswar-admin-" + Math.random().toString(36).slice(2,10));
-console.log("ADMIN_TOKEN (kullan x-admin-token header):", ADMIN_TOKEN);
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || (!IS_MAINNET ? "dev-admin-token" : "");
+console.log("ADMIN_TOKEN:", ADMIN_TOKEN ? "configured" : "missing");
 
 app.post("/api/admin/reset", (req,res)=>{
-  const token = req.headers['x-admin-token'] || (req.body && req.body.token);
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
+  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
   countries.forEach(c=>{ c.hp=1000; c.max_hp=1000; c.eliminated=false; });
   players.clear();
   recentAttacks.length=0;
@@ -1150,7 +1318,11 @@ app.post("/api/admin/reset", (req,res)=>{
 // ── ADMIN: TUR YÖNETİMİ ─────────────────────────
 function checkAdmin(req) {
   const token = req.headers['x-admin-token'] || (req.body && req.body.token);
-  return token === ADMIN_TOKEN;
+  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) return false;
+  const header = req.headers.authorization || "";
+  const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  const session = verifySessionToken(bearer);
+  return !!session && session.wallet === ADMIN_OWNER_WALLET;
 }
 
 // Tur durumu — herkes görebilir
@@ -1264,6 +1436,13 @@ async function bootstrap() {
     }
   }
 
+  try {
+    setPurchaseTotals(await db.loadPurchaseTotals());
+    console.log(`[DB] Satin alma ozeti: ${purchaseTotals.purchaseCount} islem, ${ethers.formatEther(purchaseTotals.totalWei)} ETH`);
+  } catch(e) {
+    console.error("[DB] Satin alma ozeti yuklenemedi:", e.message);
+  }
+
   server.listen(PORT, ()=>{
     console.log("ABSWAR ALLIANCE BETA BACKEND RUNNING ON PORT " + PORT);
     console.log("[DB] Durum:", db.dbEnabled ? "PostgreSQL aktif" : "Bellek modu");
@@ -1271,16 +1450,3 @@ async function bootstrap() {
 }
 
 bootstrap();
-
-
-// Admin hardening: require token + owner wallet session.
-const ADMIN_OWNER_WALLET_LIVE = "0x9C5e9dB5836e9c95be7cBec023D543c36E865B5B".toLowerCase();
-checkAdmin = function(req) {
-    const token = req.headers["x-admin-token"] || (req.body && req.body.token);
-    if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) return false;
-    const header = req.headers.authorization || "";
-    const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-    const session = verifySessionToken(bearer);
-    return !!session && session.wallet === ADMIN_OWNER_WALLET_LIVE;
-};
-console.log("[ADMIN] owner wallet guard enabled");

@@ -1271,3 +1271,16 @@ async function bootstrap() {
 }
 
 bootstrap();
+
+
+// Admin hardening: require token + owner wallet session.
+const ADMIN_OWNER_WALLET_LIVE = "0x9C5e9dB5836e9c95be7cBec023D543c36E865B5B".toLowerCase();
+checkAdmin = function(req) {
+    const token = req.headers["x-admin-token"] || (req.body && req.body.token);
+    if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) return false;
+    const header = req.headers.authorization || "";
+    const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const session = verifySessionToken(bearer);
+    return !!session && session.wallet === ADMIN_OWNER_WALLET_LIVE;
+};
+console.log("[ADMIN] owner wallet guard enabled");

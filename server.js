@@ -7,10 +7,6 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { ethers } from "ethers";
 import * as db from "./db.js";
 
-// ═══════════════════════════════════════════════
-console.log("🟢🟢🟢 ABSWAR SERVER v5 — BOOTSTRAP + DB + ADMIN — BUILD CHECK 🟢🟢🟢");
-// ═══════════════════════════════════════════════
-
 dotenv.config();
 
 const NETWORK = (process.env.ABSWAR_NETWORK || process.env.NETWORK || "testnet").toLowerCase();
@@ -37,7 +33,7 @@ const ABSWAR_CONTRACT_ADDRESS = process.env.ABSWAR_CONTRACT_ADDRESS || CHAIN.con
 const AUTH_SECRET = process.env.AUTH_SECRET || randomBytes(32).toString("hex");
 const AUTH_TTL_MS = Number(process.env.AUTH_TTL_MS || 24 * 60 * 60 * 1000);
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 5 * 60 * 1000);
-const ALLOW_DEMO_PURCHASES = process.env.ALLOW_DEMO_PURCHASES === "true" && !IS_MAINNET;
+const ALLOW_DEMO_BUY = (process.env.ALLOW_DEMO_BUY === "true" || process.env.ALLOW_DEMO_PURCHASES === "true") && !IS_MAINNET;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   "https://abswar.xyz,https://www.abswar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
   .split(",")
@@ -669,10 +665,7 @@ function getNextRank(contribution) {
 }
 
 // --- RANK NFT CLAIMS ---
-const RANK_NFT_CONTRACT_ADDRESS_ENV = process.env.RANK_NFT_CONTRACT_ADDRESS || "";
-const RANK_NFT_CONTRACT_ADDRESS = (!RANK_NFT_CONTRACT_ADDRESS_ENV || RANK_NFT_CONTRACT_ADDRESS_ENV.toLowerCase() === "0x430f3ecfacb8b1b8bda2cc54c4cdf137e01fb56a")
-  ? "0x2eBf9F9cEdAe780281fCEe5ed27a14Fd0D01D5D2"
-  : RANK_NFT_CONTRACT_ADDRESS_ENV;
+const RANK_NFT_CONTRACT_ADDRESS = process.env.RANK_NFT_CONTRACT_ADDRESS || "";
 const RANK_NFT_SIGNER_PRIVATE_KEY = process.env.RANK_NFT_SIGNER_PRIVATE_KEY || process.env.SIGNER_PRIVATE_KEY || "";
 const RANK_NFT_CLAIM_TTL_MS = Number(process.env.RANK_NFT_CLAIM_TTL_MS || 10 * 60 * 1000);
 const rankNftInterface = new ethers.Interface([
@@ -1056,8 +1049,8 @@ app.post("/api/market/buy", authRequired, rateLimited, async (req,res)=>{
 });
 
 app.post("/api/market/buy-demo", authRequired, rateLimited, (req,res)=>{
-  if (!ALLOW_DEMO_PURCHASES) {
-    return res.status(410).json({ code:"PAYMENT_VERIFICATION_REQUIRED", error:"Demo satin alma kapali; blockchain islemi gerekli" });
+  if (!ALLOW_DEMO_BUY) {
+    return res.status(403).json({ code:"DEMO_DISABLED", error:"Demo alım kapalı" });
   }
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const player = getPlayer(req.body.wallet);
@@ -1299,7 +1292,6 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
 });
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || (!IS_MAINNET ? "dev-admin-token" : "");
-console.log("ADMIN_TOKEN:", ADMIN_TOKEN ? "configured" : "missing");
 
 app.post("/api/admin/reset", (req,res)=>{
   if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
@@ -1383,6 +1375,12 @@ io.on("connection", socket=>{
 });
 
 // ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──
+app.use((err, _req, res, _next) => {
+  console.error("[SERVER_ERROR]", err && (err.stack || err.message || err));
+  if (res.headersSent) return;
+  res.status(500).json({ code:"SERVER_ERROR", error:"Beklenmeyen sunucu hatasi" });
+});
+
 async function bootstrap() {
   await db.initSchema();
   const loaded = await db.loadAll();

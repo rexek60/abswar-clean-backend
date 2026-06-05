@@ -677,7 +677,7 @@ let rankNftSigner = null;
 if (RANK_NFT_SIGNER_PRIVATE_KEY) {
   try {
     rankNftSigner = new ethers.Wallet(RANK_NFT_SIGNER_PRIVATE_KEY);
-    console.log("[RANK NFT] signer configured:", rankNftSigner.address);
+    console.log("[RANK NFT] signer configured");
   } catch {
     console.warn("[RANK NFT] invalid signer private key; NFT claim signatures disabled.");
   }

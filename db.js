@@ -98,7 +98,8 @@ export async function initSchema() {
         code        TEXT PRIMARY KEY,
         hp          INTEGER,
         max_hp      INTEGER,
-        eliminated  BOOLEAN DEFAULT FALSE
+        eliminated  BOOLEAN DEFAULT FALSE,
+        is_superpower BOOLEAN DEFAULT FALSE
       );
 
       CREATE TABLE IF NOT EXISTS game_state (
@@ -125,6 +126,7 @@ export async function initSchema() {
     // ── Migration'lar — mevcut tablolara eksik sütun/tablo ekle ──
     // (CREATE TABLE IF NOT EXISTS mevcut tabloya sütun eklemez, bu yüzden ALTER gerekli)
     await pool.query(`ALTER TABLE alliances ADD COLUMN IF NOT EXISTS country_code TEXT;`);
+    await pool.query(`ALTER TABLE countries ADD COLUMN IF NOT EXISTS is_superpower BOOLEAN DEFAULT FALSE;`);
 
     // Son saldırılar tablosu (radar + haber ticker için kalıcılık)
     await pool.query(`
@@ -184,7 +186,7 @@ export async function loadAll() {
 
     const cr = await pool.query("SELECT * FROM countries");
     out.countries = cr.rows.map(r => ({
-      code: r.code, hp: r.hp, max_hp: r.max_hp, eliminated: r.eliminated
+      code: r.code, hp: r.hp, max_hp: r.max_hp, eliminated: r.eliminated, isSuperpower: !!r.is_superpower
     }));
 
     const gr = await pool.query("SELECT wallet FROM gifted_wallets");
@@ -238,10 +240,10 @@ export function deleteAlliance(id) {
 export function saveCountry(c) {
   if (!HAS_DB || !c) return;
   pool.query(
-    `INSERT INTO countries (code,hp,max_hp,eliminated)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (code) DO UPDATE SET hp=$2, max_hp=$3, eliminated=$4`,
-    [c.code, c.hp, c.max_hp, c.eliminated]
+    `INSERT INTO countries (code,hp,max_hp,eliminated,is_superpower)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (code) DO UPDATE SET hp=$2, max_hp=$3, eliminated=$4, is_superpower=$5`,
+    [c.code, c.hp, c.max_hp, c.eliminated, !!c.isSuperpower]
   ).catch(e => console.error("[DB] saveCountry:", e.message));
 }
 

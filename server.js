@@ -56,6 +56,7 @@ if (IS_MAINNET && !process.env.ADMIN_TOKEN) {
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
+const SERVICE_STARTED_AT = Date.now();
 
 function isLoopbackOrigin(origin) {
   try {
@@ -861,6 +862,68 @@ function state() {
   };
 }
 
+function publicStatus() {
+  return {
+    ok: true,
+    name: "ABSWAR",
+    network: NETWORK,
+    chainId: CHAIN.chainId,
+    uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
+    startedAt: SERVICE_STARTED_AT,
+    dbEnabled: db.dbEnabled,
+    onlinePlayers,
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      remainingMs: timeRemainingMs()
+    },
+    economy: economyState(),
+    countries: {
+      total: countries.length,
+      alive: countries.filter(c => !c.eliminated).length,
+      startHp: START_HP,
+      maxHp: MAX_HP
+    },
+    rankNft: {
+      enabled: rankNftConfigured(),
+      contractAddress: ethers.isAddress(RANK_NFT_CONTRACT_ADDRESS) ? ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS) : null
+    },
+    security: {
+      paymentVerification: true,
+      serverSideAttacks: true,
+      rateLimit: true,
+      independentAudit: false,
+      auditNote: "Independent smart contract/security audit is still recommended before heavy public launch."
+    }
+  };
+}
+
+function adminBackupSnapshot() {
+  return {
+    ok: true,
+    generatedAt: Date.now(),
+    network: NETWORK,
+    chainId: CHAIN.chainId,
+    dbEnabled: db.dbEnabled,
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      startTime: roundStartTime,
+      endTime: roundEndTime,
+      lastResult: lastRoundResult
+    },
+    economy: economyState(),
+    countries,
+    players: [...players.values()],
+    alliances: [...alliances.values()].map(publicAlliance),
+    recentAttacks,
+    allianceFeed,
+    giftedWallets: [...giftedWallets],
+    feedback: feedbackItems.map(feedbackPublicItem),
+    rankNft: rankNftPublicState()
+  };
+}
+
 function emitState() {
   io.emit("war:state", state());
 }
@@ -873,6 +936,7 @@ function addAllianceFeed(type, message, payload={}) {
 }
 
 app.get("/", (_req,res)=>res.json({ ok:true, name:"ABSWAR Alliance Beta Backend" }));
+app.get("/api/status", (_req,res)=>res.json(publicStatus()));
 app.get("/health", (_req,res)=>res.json({
   ok:true,
   realtime:true,
@@ -886,6 +950,8 @@ app.get("/health", (_req,res)=>res.json({
   maxHp: MAX_HP,
   paymentVerification: true,
   walletAuth: "eip1271",
+  uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
+  dbEnabled: db.dbEnabled,
   rankNft: rankNftPublicState()
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
@@ -1548,6 +1614,39 @@ app.get("/api/admin/round/winners", adminRequired, (req,res) => {
 
 app.get("/api/admin/feedback", adminRequired, (_req,res) => {
   res.json({ ok:true, feedback: feedbackItems.map(feedbackPublicItem) });
+});
+
+app.get("/api/admin/metrics", adminRequired, (_req,res) => {
+  res.json({
+    ok: true,
+    generatedAt: Date.now(),
+    uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
+    dbEnabled: db.dbEnabled,
+    onlinePlayers,
+    playerCount: players.size,
+    allianceCount: alliances.size,
+    giftedCount: giftedWallets.size,
+    feedbackCount: feedbackItems.length,
+    recentAttackCount: recentAttacks.length,
+    economy: economyState(),
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      remainingMs: timeRemainingMs()
+    },
+    countries: {
+      total: countries.length,
+      alive: countries.filter(c => !c.eliminated).length,
+      eliminated: countries.filter(c => c.eliminated).length,
+      superpowers: countries.filter(c => c.isSuperpower).length
+    },
+    rankNft: rankNftPublicState()
+  });
+});
+
+app.get("/api/admin/backup", adminRequired, (_req,res) => {
+  res.setHeader("Content-Disposition", `attachment; filename="abswar-backup-${Date.now()}.json"`);
+  res.json(adminBackupSnapshot());
 });
 
 app.post("/api/admin/round/payout-log", adminRequired, (req,res) => {

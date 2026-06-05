@@ -790,6 +790,33 @@ async function createRankNftSignature(wallet, rankIndex) {
   return { deadline, digest, signature };
 }
 
+async function createRankNftClaimPayload(wallet, rankIndex) {
+  const rank = RANKS[rankIndex];
+  if (await hasMintedRankNft(wallet, rankIndex)) {
+    return {
+      ok:true,
+      status:"owned",
+      wallet,
+      rank: publicRank(rank, rankIndex),
+      chainId: CHAIN.chainId,
+      contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS)
+    };
+  }
+
+  const claim = await createRankNftSignature(wallet, rankIndex);
+  return {
+    ok:true,
+    status:"claimable",
+    wallet,
+    rank: publicRank(rank, rankIndex),
+    chainId: CHAIN.chainId,
+    contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+    signerAddress: rankNftSigner.address,
+    deadline: claim.deadline,
+    signature: claim.signature
+  };
+}
+
 function publicAlliance(a) {
   return {
     id:a.id,
@@ -992,7 +1019,8 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
       });
     }
 
-    if (await hasMintedRankNft(wallet, rankIndex)) {
+    const claimPayload = await createRankNftClaimPayload(wallet, rankIndex);
+    if (claimPayload.status === "owned") {
       return res.status(409).json({
         code:"RANK_NFT_ALREADY_MINTED",
         error:"Bu rutbe NFT'si daha once alinmis",
@@ -1000,19 +1028,57 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
       });
     }
 
-    const claim = await createRankNftSignature(wallet, rankIndex);
-    res.json({
-      ok:true,
-      wallet,
-      rank: publicRank(rank, rankIndex),
-      chainId: CHAIN.chainId,
-      contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
-      signerAddress: rankNftSigner.address,
-      deadline: claim.deadline,
-      signature: claim.signature
-    });
+    res.json(claimPayload);
   } catch (e) {
     res.status(500).json({ code:"RANK_NFT_SIGNATURE_FAILED", error:e.message || "NFT imzasi uretilemedi" });
+  }
+});
+
+app.post("/api/admin/nft/rank-grant", adminRequired, rateLimited, async (req,res) => {
+  try {
+    if (!rankNftConfigured()) {
+      return res.status(503).json({
+        code:"RANK_NFT_NOT_READY",
+        error:"Rutbe NFT kontrati veya signer henuz ayarlanmadi",
+        rankNft: rankNftPublicState()
+      });
+    }
+
+    const targetWallet = normalizeWallet(req.body && req.body.wallet) || req.wallet;
+    if (targetWallet !== req.wallet || targetWallet !== ADMIN_OWNER_WALLET) {
+      return res.status(403).json({
+        code:"ADMIN_NFT_WALLET_ONLY",
+        error:"Admin rozet mint izni sadece bagli owner cuzdanina verilir"
+      });
+    }
+
+    const requestedRanks = Array.isArray(req.body && req.body.ranks)
+      ? req.body.ranks.map(Number)
+      : RANKS.map((_rank, index) => index);
+    const rankIndexes = [...new Set(requestedRanks)]
+      .filter(rank => Number.isInteger(rank) && rank >= 0 && rank < RANKS.length)
+      .sort((a,b) => a-b);
+
+    if (rankIndexes.length === 0) {
+      return res.status(400).json({ code:"INVALID_RANKS", error:"Gecerli rutbe bulunamadi" });
+    }
+
+    const claims = [];
+    for (const rankIndex of rankIndexes) {
+      claims.push(await createRankNftClaimPayload(targetWallet, rankIndex));
+    }
+
+    res.json({
+      ok:true,
+      wallet: targetWallet,
+      chainId: CHAIN.chainId,
+      contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+      claims,
+      claimable: claims.filter(c => c.status === "claimable").length,
+      owned: claims.filter(c => c.status === "owned").length
+    });
+  } catch (e) {
+    res.status(500).json({ code:"ADMIN_RANK_NFT_GRANT_FAILED", error:e.message || "Admin NFT imzasi uretilemedi" });
   }
 });
 

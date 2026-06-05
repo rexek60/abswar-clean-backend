@@ -1044,8 +1044,9 @@ app.post("/api/admin/nft/rank-grant", adminRequired, rateLimited, async (req,res
       });
     }
 
-    const targetWallet = normalizeWallet(req.body && req.body.wallet) || req.wallet;
-    if (targetWallet !== req.wallet || targetWallet !== ADMIN_OWNER_WALLET) {
+    const adminWallet = req.adminWallet || req.wallet;
+    const targetWallet = normalizeWallet(req.body && req.body.wallet) || adminWallet;
+    if (adminWallet !== ADMIN_OWNER_WALLET || targetWallet !== ADMIN_OWNER_WALLET) {
       return res.status(403).json({
         code:"ADMIN_NFT_WALLET_ONLY",
         error:"Admin rozet mint izni sadece bagli owner cuzdanina verilir"
@@ -1509,7 +1510,9 @@ function checkAdmin(req) {
   const header = req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const session = verifySessionToken(bearer);
-  return !!session && session.wallet === ADMIN_OWNER_WALLET;
+  if (!session || session.wallet !== ADMIN_OWNER_WALLET) return false;
+  req.adminWallet = session.wallet;
+  return true;
 }
 
 function adminRequired(req, res, next) {

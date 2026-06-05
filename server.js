@@ -57,8 +57,18 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
 
+function isLoopbackOrigin(origin) {
+  try {
+    const url = new URL(origin);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function corsOrigin(origin, callback) {
-  if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+  if (!origin || ALLOWED_ORIGINS.includes(origin) || isLoopbackOrigin(origin)) return callback(null, true);
   return callback(new Error("Origin not allowed"));
 }
 
@@ -66,10 +76,14 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: "64kb" }));
 
 const io = new Server(server, {
-  cors: { origin: ALLOWED_ORIGINS, credentials: true }
+  cors: { origin: corsOrigin, credentials: true }
 });
 
 let onlinePlayers = 0;
+const START_HP = 1000;
+const MAX_HP = 100000;
+const SUPERPOWER_ATTACK_MULTIPLIER = 1.5;
+const SUPERPOWER_DAMAGE_MULTIPLIER = 0.75;
 
 const countries = [
   ["AF","Afghanistan","🇦🇫"],
@@ -192,11 +206,12 @@ const countries = [
   ["ZM","Zambia","🇿🇲"],
   ["ZW","Zimbabwe","🇿🇼"]
 ].map(([code,name,flag]) => ({
-  code, name, flag, hp:1000, max_hp:1000, eliminated:false
+  code, name, flag, hp:START_HP, max_hp:MAX_HP, eliminated:false, isSuperpower:false
 }));
 
 const players = new Map();
 const recentAttacks = [];
+const feedbackItems = [];
 // İlk 100 kullanıcı hediye sistemi
 const GIFT_LIMIT = 100;       // İlk kaç kullanıcı bonus alır
 const GIFT_AMOUNT = 100;      // Bonus mermi miktarı
@@ -204,6 +219,45 @@ const giftedWallets = new Set(); // Hediye alan cüzdanlar
 const cooldowns = new Map();
 const alliances = new Map();
 const allianceFeed = [];
+
+function countryHpCap(_country) {
+  return MAX_HP;
+}
+
+function clampCountryHp(country) {
+  if (!country) return country;
+  country.max_hp = countryHpCap(country);
+  country.hp = Math.max(0, Math.min(country.max_hp, Number(country.hp) || 0));
+  country.isSuperpower = !!country.isSuperpower || country.hp >= MAX_HP;
+  country.eliminated = !!country.eliminated || country.hp <= 0;
+  return country;
+}
+
+function resetCountryForNewRound(country) {
+  country.hp = START_HP;
+  country.max_hp = MAX_HP;
+  country.eliminated = false;
+  country.isSuperpower = false;
+}
+
+function markSuperpower(country) {
+  if (!country || country.isSuperpower) return false;
+  country.isSuperpower = true;
+  country.hp = MAX_HP;
+  const message = `🌟 ${country.flag || ""} ${country.name || country.code} SÜPER GÜÇ oldu!`;
+  io.emit("country:superpower", { country:country.code, hp:country.hp, isSuperpower:true, message });
+  addAllianceFeed("SUPERPOWER", message, { country:country.code });
+  return true;
+}
+
+function addCountryHp(country, amount) {
+  if (!country || country.eliminated) return false;
+  const beforeSuperpower = !!country.isSuperpower;
+  country.max_hp = MAX_HP;
+  country.hp = Math.min(MAX_HP, Math.max(0, Number(country.hp) || 0) + Math.max(0, Number(amount) || 0));
+  if (!beforeSuperpower && country.hp >= MAX_HP) return markSuperpower(country);
+  return false;
+}
 
 // ── TUR / OYUN DÖNGÜSÜ ─────────────────────────
 const ROUND_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 gün
@@ -255,6 +309,7 @@ function computeRoundResult() {
     countryName: c.name,
     flag: c.flag,
     hp: c.hp,
+    isSuperpower: !!c.isSuperpower,
     sharePct: shares[i] || 0,
     topPlayer: getTopPlayerOfCountry(c.code)?.wallet || null,
     topPlayerContribution: getTopPlayerOfCountry(c.code)?.contribution || 0
@@ -300,7 +355,7 @@ function startNewRound() {
   roundEndTime = roundStartTime + ROUND_DURATION_MS;
   roundStatus = 'active';
   // Ülkeleri sıfırla
-  countries.forEach(c => { c.hp = 1000; c.max_hp = 1000; c.eliminated = false; });
+  countries.forEach(resetCountryForNewRound);
   // Saldırı geçmişi & ittifak feed temizle (oyuncular ve mermileri korunur)
   recentAttacks.length = 0;
   cooldowns.clear();
@@ -800,11 +855,72 @@ app.get("/health", (_req,res)=>res.json({
   onlinePlayers,
   network: NETWORK,
   chainId: CHAIN.chainId,
+  startHp: START_HP,
+  maxHp: MAX_HP,
   paymentVerification: true,
   walletAuth: "eip1271",
   rankNft: rankNftPublicState()
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
+
+const FEEDBACK_TYPES = new Set(["bug", "idea", "praise", "other"]);
+function feedbackPublicItem(item) {
+  return {
+    id: item.id,
+    type: item.type,
+    wallet: item.wallet,
+    country: item.country,
+    message: item.message,
+    url: item.url,
+    userAgent: item.userAgent,
+    created_at: item.created_at
+  };
+}
+
+async function forwardFeedbackToDiscord(item) {
+  const webhookUrl = process.env.DISCORD_FEEDBACK_WEBHOOK_URL || process.env.FEEDBACK_WEBHOOK_URL || "";
+  if (!webhookUrl) return;
+  const content = [
+    `ABSWAR feedback: ${item.type}`,
+    `Wallet: ${item.wallet || "not connected"}`,
+    `Country: ${item.country || "-"}`,
+    `URL: ${item.url || "-"}`,
+    "",
+    item.message
+  ].join("\n").slice(0, 1900);
+  await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content })
+  });
+}
+
+app.post("/api/feedback", rateLimited, async (req,res,next)=>{
+  try {
+    const type = FEEDBACK_TYPES.has(req.body && req.body.type) ? req.body.type : "other";
+    const message = String(req.body && req.body.message || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 500);
+    if (message.length < 5) return res.status(400).json({ code:"FEEDBACK_TOO_SHORT", error:"Mesaj cok kisa" });
+
+    const wallet = normalizeWallet(req.body && req.body.wallet);
+    const item = {
+      id: randomBytes(8).toString("hex"),
+      type,
+      wallet,
+      country: String(req.body && req.body.country || "").trim().slice(0, 3).toUpperCase() || null,
+      message,
+      url: String(req.body && req.body.url || "").trim().slice(0, 300),
+      userAgent: String(req.headers["user-agent"] || "").slice(0, 160),
+      created_at: Date.now()
+    };
+
+    feedbackItems.unshift(item);
+    if (feedbackItems.length > 100) feedbackItems.pop();
+    forwardFeedbackToDiscord(item).catch(e => console.warn("[FEEDBACK] Discord webhook failed:", e.message));
+    res.status(202).json({ ok:true, id:item.id });
+  } catch (e) {
+    next(e);
+  }
+});
 
 app.post("/api/auth/challenge", rateLimited, (req,res)=>{
   const wallet = normalizeWallet(req.body && req.body.wallet);
@@ -1007,9 +1123,9 @@ app.post("/api/player/produce-resource", authRequired, rateLimited, (req,res)=>{
       if (player.country_code) {
         const myCountry = countries.find(c => c.code === player.country_code);
         if (myCountry && !myCountry.eliminated) {
-          myCountry.hp = Math.min(myCountry.max_hp, myCountry.hp + 50);
+          addCountryHp(myCountry, 50);
           bonus = { type:'hp', amount:50, message:'⚡ Enerji %100! Ülken +50 HP' };
-          io.emit("hp:update", { target: myCountry.code, newHP: myCountry.hp });
+          io.emit("hp:update", { target: myCountry.code, newHP: myCountry.hp, maxHP: myCountry.max_hp, isSuperpower: !!myCountry.isSuperpower });
           db.saveCountry(myCountry);
         }
       }
@@ -1225,13 +1341,16 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
     defenderUranium = Math.min(defenderTop.resources.uranium||0, 10);
   }
 
-  // Hasar hesaplaması: 1 + metal bonus - uranyum kalkanı (min 1 olur)
-  const damage = Math.max(1, Math.round(1 + (attackerMetal/100) - (defenderUranium/100)));
+  clampCountryHp(target);
+  clampCountryHp(own);
+  // Hasar server-side hesaplanır: kaynak bonusları + süper güç buffları.
+  let rawDamage = 1 + (attackerMetal/100) - (defenderUranium/100);
+  if (own.isSuperpower) rawDamage *= SUPERPOWER_ATTACK_MULTIPLIER;
+  if (target.isSuperpower) rawDamage *= SUPERPOWER_DAMAGE_MULTIPLIER;
+  const damage = Math.max(1, Math.round(rawDamage));
 
   target.hp = Math.max(0, target.hp - damage);
-  // Saldıran ülkenin HP'si artar ama 100.000 tavanını geçemez (sınırsız büyümeyi önler)
-  const HP_CAP = 100000;
-  own.hp = Math.min(HP_CAP, own.hp + damage);
+  addCountryHp(own, damage);
 
   // ── RÜTBE BONUSU ──
   const rank = getRank(player.contribution);
@@ -1276,6 +1395,9 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
     targetCountry: target.code,
     damage:damage,
     newHp: target.hp,
+    attackerHp: own.hp,
+    attackerSuperpower: !!own.isSuperpower,
+    targetSuperpower: !!target.isSuperpower,
     wallet:player.wallet,
     alliance_id:player.alliance_id,
     created_at:Date.now()
@@ -1286,7 +1408,8 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   db.saveAttack(attack);
 
   io.emit("war:attack", attack);
-  io.emit("hp:update", { target: target.code, newHP: target.hp });
+  io.emit("hp:update", { target: target.code, newHP: target.hp, maxHP: target.max_hp, isSuperpower: !!target.isSuperpower });
+  io.emit("hp:update", { target: own.code, newHP: own.hp, maxHP: own.max_hp, isSuperpower: !!own.isSuperpower });
   emitState();
 
   res.json({ ok:true, attack, player, newHp: target.hp, damage:damage });
@@ -1294,9 +1417,11 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || (!IS_MAINNET ? "dev-admin-token" : "");
 
-app.post("/api/admin/reset", (req,res)=>{
-  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
-  countries.forEach(c=>{ c.hp=1000; c.max_hp=1000; c.eliminated=false; });
+app.post("/api/admin/reset", adminRequired, (req,res)=>{
+  if (roundStatus === 'active') {
+    return res.status(400).json({ code:"RESET_REQUIRES_ENDED_ROUND", error:"Tam reset aktif turda kapali. Once turu bitir." });
+  }
+  countries.forEach(resetCountryForNewRound);
   players.clear();
   recentAttacks.length=0;
   cooldowns.clear();
@@ -1321,6 +1446,11 @@ function checkAdmin(req) {
   return !!session && session.wallet === ADMIN_OWNER_WALLET;
 }
 
+function adminRequired(req, res, next) {
+  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
+  next();
+}
+
 // Tur durumu — herkes görebilir
 app.get("/api/round/status", (_req,res) => {
   res.json({
@@ -1336,8 +1466,7 @@ app.get("/api/round/status", (_req,res) => {
 });
 
 // Admin: kazanan listesini gör (ödeme yapmadan önce kontrol)
-app.get("/api/admin/round/winners", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
+app.get("/api/admin/round/winners", adminRequired, (req,res) => {
   if (roundStatus === 'active') {
     return res.json({
       preview: true,
@@ -1348,17 +1477,43 @@ app.get("/api/admin/round/winners", (req,res) => {
   res.json({ preview:false, winners: lastRoundResult?.winners || [] });
 });
 
+app.get("/api/admin/feedback", adminRequired, (_req,res) => {
+  res.json({ ok:true, feedback: feedbackItems.map(feedbackPublicItem) });
+});
+
+app.post("/api/admin/round/payout-log", adminRequired, (req,res) => {
+  if (!lastRoundResult) return res.status(400).json({ code:"NO_ROUND_RESULT", error:"Kaydedilecek bitmis tur yok" });
+  const rank = Number(req.body && req.body.rank);
+  const txHash = String(req.body && req.body.txHash || "").trim();
+  if (!Number.isInteger(rank) || rank < 1 || rank > 3) {
+    return res.status(400).json({ code:"INVALID_RANK", error:"Gecersiz odul sirasi" });
+  }
+  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
+    return res.status(400).json({ code:"INVALID_TX_HASH", error:"Gecersiz islem hash'i" });
+  }
+  const payout = {
+    rank,
+    txHash,
+    explorerUrl: `${CHAIN.explorerUrl}/tx/${txHash}`,
+    recordedAt: Date.now()
+  };
+  const payouts = Array.isArray(lastRoundResult.payouts) ? lastRoundResult.payouts.filter(p => p.rank !== rank) : [];
+  payouts.push(payout);
+  payouts.sort((a,b)=>a.rank-b.rank);
+  lastRoundResult.payouts = payouts;
+  persistRoundState();
+  res.json({ ok:true, payout, payouts });
+});
+
 // Admin: turu manuel bitir
-app.post("/api/admin/round/end", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
+app.post("/api/admin/round/end", adminRequired, (req,res) => {
   if (roundStatus !== 'active') return res.status(400).json({ code:"ROUND_ALREADY_ENDED", error:"Tur zaten bitmiş" });
   endRound();
   res.json({ ok:true, result: lastRoundResult });
 });
 
 // Admin: yeni tur başlat (ödüller dağıtıldıktan SONRA)
-app.post("/api/admin/round/start", (req,res) => {
-  if (!checkAdmin(req)) return res.status(403).json({ code:"UNAUTHORIZED", error:"Yetkin yok" });
+app.post("/api/admin/round/start", adminRequired, (req,res) => {
   if (roundStatus === 'active') return res.status(400).json({ code:"ROUND_ALREADY_ACTIVE", error:"Zaten aktif tur var" });
   startNewRound();
   res.json({ ok:true, round: { number: roundNumber, startTime: roundStartTime, endTime: roundEndTime } });
@@ -1420,6 +1575,9 @@ async function bootstrap() {
           memC.hp = dbC.hp;
           memC.max_hp = dbC.max_hp;
           memC.eliminated = dbC.eliminated;
+          memC.isSuperpower = !!dbC.isSuperpower;
+          clampCountryHp(memC);
+          db.saveCountry(memC);
         }
       }
     } else {

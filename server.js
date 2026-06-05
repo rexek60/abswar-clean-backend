@@ -665,7 +665,8 @@ function getNextRank(contribution) {
 }
 
 // --- RANK NFT CLAIMS ---
-const RANK_NFT_CONTRACT_ADDRESS = process.env.RANK_NFT_CONTRACT_ADDRESS || "";
+const RANK_NFT_MAINNET_CONTRACT_ADDRESS = "0xB58581518367607fe730c33b23df2bc0A8ae1113";
+const RANK_NFT_CONTRACT_ADDRESS = RANK_NFT_MAINNET_CONTRACT_ADDRESS;
 const RANK_NFT_SIGNER_PRIVATE_KEY = process.env.RANK_NFT_SIGNER_PRIVATE_KEY || process.env.SIGNER_PRIVATE_KEY || "";
 const RANK_NFT_CLAIM_TTL_MS = Number(process.env.RANK_NFT_CLAIM_TTL_MS || 10 * 60 * 1000);
 const rankNftInterface = new ethers.Interface([

@@ -484,6 +484,7 @@ const AMMO_PACKS = {
   9999: { bullets:100000, valueWei: ethers.parseEther("1.0") }
 };
 const memoryPurchases = new Set();
+const memoryPurchaseList = [];
 let purchaseTotals = { purchaseCount:0, totalBullets:0, totalWei:"0" };
 
 function setPurchaseTotals(totals={}) {
@@ -501,6 +502,77 @@ function addPurchaseToTotals(purchase) {
     totalBullets: purchaseTotals.totalBullets + (Number(purchase.bullets) || 0),
     totalWei: (currentWei + BigInt(purchase.valueWei || "0")).toString()
   };
+}
+
+function rememberPurchase(purchase) {
+  if (!purchase) return;
+  memoryPurchaseList.unshift({ ...purchase });
+  if (memoryPurchaseList.length > 200) memoryPurchaseList.length = 200;
+}
+
+function cleanWei(value) {
+  return String(value || "0").split(".")[0];
+}
+
+function purchasePublicItem(purchase) {
+  const valueWei = cleanWei(purchase.valueWei || purchase.value_wei);
+  const rewardWei = ((BigInt(valueWei || "0") * 70n) / 100n).toString();
+  const txHash = String(purchase.txHash || purchase.tx_hash || "").toLowerCase();
+  return {
+    txHash,
+    wallet: normalizeWallet(purchase.wallet) || String(purchase.wallet || ""),
+    pack: Number(purchase.pack) || 0,
+    bullets: Number(purchase.bullets) || 0,
+    valueWei,
+    valueEth: ethers.formatEther(valueWei),
+    rewardWei,
+    rewardEth: ethers.formatEther(rewardWei),
+    chainId: Number(purchase.chainId || purchase.chain_id || CHAIN.chainId),
+    blockNumber: purchase.blockNumber || purchase.block_number || null,
+    createdAt: Number(purchase.createdAt || purchase.created_at || Date.now()),
+    explorerUrl: txHash ? `${CHAIN.explorerUrl}/tx/${txHash}` : null
+  };
+}
+
+function walletDepositPublicItem(row) {
+  const totalWei = cleanWei(row.totalWei || row.total_wei);
+  const rewardWei = ((BigInt(totalWei || "0") * 70n) / 100n).toString();
+  return {
+    wallet: normalizeWallet(row.wallet) || String(row.wallet || ""),
+    purchaseCount: Number(row.purchaseCount || row.purchase_count) || 0,
+    totalBullets: Number(row.totalBullets || row.total_bullets) || 0,
+    totalWei,
+    totalEth: ethers.formatEther(totalWei),
+    rewardWei,
+    rewardEth: ethers.formatEther(rewardWei),
+    lastPurchaseAt: Number(row.lastPurchaseAt || row.last_purchase_at) || 0
+  };
+}
+
+function memoryWalletDepositTotals() {
+  const totals = new Map();
+  for (const purchase of memoryPurchaseList) {
+    const wallet = normalizeWallet(purchase.wallet) || String(purchase.wallet || "");
+    if (!wallet) continue;
+    const current = totals.get(wallet) || {
+      wallet,
+      purchaseCount: 0,
+      totalBullets: 0,
+      totalWei: "0",
+      lastPurchaseAt: 0
+    };
+    current.purchaseCount += 1;
+    current.totalBullets += Number(purchase.bullets) || 0;
+    current.totalWei = (BigInt(current.totalWei || "0") + BigInt(cleanWei(purchase.valueWei))).toString();
+    current.lastPurchaseAt = Math.max(current.lastPurchaseAt, Number(purchase.createdAt) || 0);
+    totals.set(wallet, current);
+  }
+  return [...totals.values()].sort((a,b) => {
+    const byWei = BigInt(b.totalWei || "0") - BigInt(a.totalWei || "0");
+    if (byWei > 0n) return 1;
+    if (byWei < 0n) return -1;
+    return (b.lastPurchaseAt || 0) - (a.lastPurchaseAt || 0);
+  });
 }
 
 function economyState() {
@@ -613,6 +685,7 @@ async function recordPurchaseOnce(purchase) {
   }
   memoryPurchases.add(purchase.txHash);
   addPurchaseToTotals(purchase);
+  rememberPurchase(purchase);
   return true;
 }
 
@@ -1677,6 +1750,34 @@ app.get("/api/admin/metrics", adminRequired, (_req,res) => {
       superpowers: countries.filter(c => c.isSuperpower).length
     },
     rankNft: rankNftPublicState()
+  });
+});
+
+app.get("/api/admin/purchases", adminRequired, async (req,res) => {
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+  let purchases = [];
+  let wallets = [];
+
+  if (db.dbEnabled) {
+    [purchases, wallets] = await Promise.all([
+      db.loadRecentPurchases(limit),
+      db.loadWalletDepositTotals(100)
+    ]);
+  } else {
+    purchases = memoryPurchaseList.slice(0, limit);
+    wallets = memoryWalletDepositTotals().slice(0, 100);
+  }
+
+  res.json({
+    ok: true,
+    generatedAt: Date.now(),
+    dbEnabled: db.dbEnabled,
+    network: NETWORK,
+    chainId: CHAIN.chainId,
+    explorerUrl: CHAIN.explorerUrl,
+    economy: economyState(),
+    wallets: wallets.map(walletDepositPublicItem),
+    purchases: purchases.map(purchasePublicItem)
   });
 });
 

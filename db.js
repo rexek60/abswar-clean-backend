@@ -348,6 +348,59 @@ export async function loadPurchaseTotals() {
   }
 }
 
+export async function loadRecentPurchases(limit = 50) {
+  if (!HAS_DB) return [];
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 50));
+  try {
+    const r = await pool.query(`
+      SELECT
+        tx_hash AS "txHash",
+        wallet,
+        pack,
+        bullets,
+        value_wei AS "valueWei",
+        chain_id AS "chainId",
+        block_number AS "blockNumber",
+        created_at AS "createdAt"
+      FROM purchases
+      ORDER BY created_at DESC
+      LIMIT $1
+    `, [safeLimit]);
+    return r.rows;
+  } catch (e) {
+    console.error("[DB] loadRecentPurchases:", e.message);
+    return [];
+  }
+}
+
+export async function loadWalletDepositTotals(limit = 100) {
+  if (!HAS_DB) return [];
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+  try {
+    const r = await pool.query(`
+      SELECT
+        wallet,
+        COUNT(*)::int AS "purchaseCount",
+        COALESCE(SUM(bullets), 0)::bigint::text AS "totalBullets",
+        COALESCE(SUM(value_wei::numeric), 0)::text AS "totalWei",
+        MAX(created_at)::bigint AS "lastPurchaseAt"
+      FROM purchases
+      GROUP BY wallet
+      ORDER BY COALESCE(SUM(value_wei::numeric), 0) DESC, MAX(created_at) DESC
+      LIMIT $1
+    `, [safeLimit]);
+    return r.rows.map(row => ({
+      ...row,
+      totalWei: String(row.totalWei || "0").split(".")[0],
+      totalBullets: Number(row.totalBullets) || 0,
+      lastPurchaseAt: Number(row.lastPurchaseAt) || 0
+    }));
+  } catch (e) {
+    console.error("[DB] loadWalletDepositTotals:", e.message);
+    return [];
+  }
+}
+
 // Tam reset (admin)
 export async function wipeAll() {
   if (!HAS_DB) return;

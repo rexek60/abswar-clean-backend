@@ -924,6 +924,41 @@ function adminBackupSnapshot() {
   };
 }
 
+function rewardStatus() {
+  const lastPayouts = Array.isArray(lastRoundResult && lastRoundResult.payouts)
+    ? lastRoundResult.payouts
+    : [];
+  return {
+    ok: true,
+    network: NETWORK,
+    chainId: CHAIN.chainId,
+    contractAddress: ethers.isAddress(ABSWAR_CONTRACT_ADDRESS) ? ethers.getAddress(ABSWAR_CONTRACT_ADDRESS) : null,
+    economy: economyState(),
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      endTime: roundEndTime,
+      remainingMs: timeRemainingMs(),
+      lastResult: lastRoundResult
+    },
+    rules: {
+      durationDays: 7,
+      winnerSharesPct: [60, 25, 15],
+      rewardPoolPct: 70,
+      treasuryPct: 20,
+      operationsPct: 10,
+      payoutMode: "admin-payReward-log",
+      payoutModeNote: "Current version records admin payReward transaction hashes; fully automatic escrow payout requires a new contract version."
+    },
+    payouts: lastPayouts,
+    transparency: {
+      paymentVerification: true,
+      payoutHashesRecorded: lastPayouts.length,
+      independentAudit: false
+    }
+  };
+}
+
 function emitState() {
   io.emit("war:state", state());
 }
@@ -937,6 +972,7 @@ function addAllianceFeed(type, message, payload={}) {
 
 app.get("/", (_req,res)=>res.json({ ok:true, name:"ABSWAR Alliance Beta Backend" }));
 app.get("/api/status", (_req,res)=>res.json(publicStatus()));
+app.get("/api/reward/status", (_req,res)=>res.json(rewardStatus()));
 app.get("/health", (_req,res)=>res.json({
   ok:true,
   realtime:true,

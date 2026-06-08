@@ -121,6 +121,15 @@ export async function initSchema() {
         block_number BIGINT,
         created_at   BIGINT
       );
+
+      CREATE TABLE IF NOT EXISTS admin_bullet_grants (
+        id           BIGSERIAL PRIMARY KEY,
+        wallet       TEXT NOT NULL,
+        bullets      INTEGER NOT NULL,
+        reason       TEXT,
+        admin_wallet TEXT,
+        created_at   BIGINT
+      );
     `);
 
     // ── Migration'lar — mevcut tablolara eksik sütun/tablo ekle ──
@@ -397,6 +406,53 @@ export async function loadWalletDepositTotals(limit = 100) {
     }));
   } catch (e) {
     console.error("[DB] loadWalletDepositTotals:", e.message);
+    return [];
+  }
+}
+
+export async function recordBulletGrant(grant) {
+  if (!HAS_DB || !grant) return null;
+  try {
+    await pool.query(
+      `INSERT INTO admin_bullet_grants (wallet,bullets,reason,admin_wallet,created_at)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [
+        grant.wallet,
+        grant.bullets,
+        grant.reason || null,
+        grant.adminWallet || null,
+        grant.createdAt || Date.now()
+      ]
+    );
+    return true;
+  } catch (e) {
+    console.error("[DB] recordBulletGrant:", e.message);
+    return false;
+  }
+}
+
+export async function loadRecentBulletGrants(limit = 50) {
+  if (!HAS_DB) return [];
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 50));
+  try {
+    const r = await pool.query(`
+      SELECT
+        wallet,
+        bullets,
+        reason,
+        admin_wallet AS "adminWallet",
+        created_at AS "createdAt"
+      FROM admin_bullet_grants
+      ORDER BY created_at DESC, id DESC
+      LIMIT $1
+    `, [safeLimit]);
+    return r.rows.map(row => ({
+      ...row,
+      bullets: Number(row.bullets) || 0,
+      createdAt: Number(row.createdAt) || 0
+    }));
+  } catch (e) {
+    console.error("[DB] loadRecentBulletGrants:", e.message);
     return [];
   }
 }

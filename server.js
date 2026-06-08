@@ -485,6 +485,9 @@ const AMMO_PACKS = {
 };
 const memoryPurchases = new Set();
 const memoryPurchaseList = [];
+const memoryBulletGrants = [];
+const MAX_ADMIN_BULLET_GRANT = Math.max(1, Number(process.env.ADMIN_BULLET_GRANT_MAX || 100000));
+const MAX_PLAYER_BULLETS = 2147483647;
 let purchaseTotals = { purchaseCount:0, totalBullets:0, totalWei:"0" };
 
 function setPurchaseTotals(totals={}) {
@@ -508,6 +511,12 @@ function rememberPurchase(purchase) {
   if (!purchase) return;
   memoryPurchaseList.unshift({ ...purchase });
   if (memoryPurchaseList.length > 200) memoryPurchaseList.length = 200;
+}
+
+function rememberBulletGrant(grant) {
+  if (!grant) return;
+  memoryBulletGrants.unshift({ ...grant });
+  if (memoryBulletGrants.length > 200) memoryBulletGrants.length = 200;
 }
 
 function cleanWei(value) {
@@ -546,6 +555,16 @@ function walletDepositPublicItem(row) {
     rewardWei,
     rewardEth: ethers.formatEther(rewardWei),
     lastPurchaseAt: Number(row.lastPurchaseAt || row.last_purchase_at) || 0
+  };
+}
+
+function bulletGrantPublicItem(grant) {
+  return {
+    wallet: normalizeWallet(grant.wallet) || String(grant.wallet || ""),
+    bullets: Number(grant.bullets) || 0,
+    reason: String(grant.reason || "").slice(0, 120),
+    adminWallet: normalizeWallet(grant.adminWallet || grant.admin_wallet) || String(grant.adminWallet || grant.admin_wallet || ""),
+    createdAt: Number(grant.createdAt || grant.created_at || Date.now())
   };
 }
 
@@ -1757,15 +1776,18 @@ app.get("/api/admin/purchases", adminRequired, async (req,res) => {
   const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
   let purchases = [];
   let wallets = [];
+  let grants = [];
 
   if (db.dbEnabled) {
-    [purchases, wallets] = await Promise.all([
+    [purchases, wallets, grants] = await Promise.all([
       db.loadRecentPurchases(limit),
-      db.loadWalletDepositTotals(100)
+      db.loadWalletDepositTotals(100),
+      db.loadRecentBulletGrants(20)
     ]);
   } else {
     purchases = memoryPurchaseList.slice(0, limit);
     wallets = memoryWalletDepositTotals().slice(0, 100);
+    grants = memoryBulletGrants.slice(0, 20);
   }
 
   res.json({
@@ -1777,8 +1799,52 @@ app.get("/api/admin/purchases", adminRequired, async (req,res) => {
     explorerUrl: CHAIN.explorerUrl,
     economy: economyState(),
     wallets: wallets.map(walletDepositPublicItem),
-    purchases: purchases.map(purchasePublicItem)
+    purchases: purchases.map(purchasePublicItem),
+    grants: grants.map(bulletGrantPublicItem)
   });
+});
+
+app.post("/api/admin/bullets/grant", adminRequired, async (req,res) => {
+  const targetWallet = normalizeWallet(req.body && req.body.wallet);
+  const requestedBullets = Math.trunc(Number(req.body && (req.body.bullets ?? req.body.amount)));
+  const reason = String(req.body && req.body.reason || "").trim().slice(0, 120);
+
+  if (!targetWallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+  if (!Number.isSafeInteger(requestedBullets) || requestedBullets < 1) {
+    return res.status(400).json({ code:"INVALID_BULLET_AMOUNT", error:"Gecersiz mermi miktari" });
+  }
+  if (requestedBullets > MAX_ADMIN_BULLET_GRANT) {
+    return res.status(400).json({
+      code:"ADMIN_BULLET_GRANT_LIMIT",
+      error:`Tek seferde en fazla ${MAX_ADMIN_BULLET_GRANT} mermi verilebilir`
+    });
+  }
+
+  const player = getPlayer(targetWallet);
+  const before = Number(player.bullets) || 0;
+  const after = Math.min(MAX_PLAYER_BULLETS, before + requestedBullets);
+  const added = after - before;
+  if (added < 1) {
+    return res.status(400).json({ code:"PLAYER_BULLET_CAP", error:"Oyuncu mermi sinirinda" });
+  }
+
+  player.bullets = after;
+  db.savePlayer(player);
+
+  const grant = {
+    wallet: player.wallet,
+    bullets: added,
+    reason,
+    adminWallet: req.adminWallet,
+    createdAt: Date.now()
+  };
+  rememberBulletGrant(grant);
+  await db.recordBulletGrant(grant);
+
+  const publicGrant = bulletGrantPublicItem(grant);
+  io.emit("admin:bullet-grant", publicGrant);
+  emitState();
+  res.json({ ok:true, player, grant:publicGrant });
 });
 
 app.get("/api/admin/backup", adminRequired, (_req,res) => {

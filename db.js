@@ -56,6 +56,11 @@ if (HAS_DB) {
 
 export const dbEnabled = HAS_DB;
 
+const rankClaimFallback = new Map();
+function rankClaimKey(wallet, rankIndex) {
+  return `${String(wallet || "").toLowerCase()}:${Number(rankIndex)}`;
+}
+
 // ── ŞEMA OLUŞTURMA ──
 export async function initSchema() {
   if (!HAS_DB) {
@@ -130,10 +135,18 @@ export async function initSchema() {
         admin_wallet TEXT,
         created_at   BIGINT
       );
+
+      CREATE TABLE IF NOT EXISTS rank_claims (
+        wallet     TEXT,
+        rank_index INTEGER,
+        deadline   BIGINT,
+        PRIMARY KEY (wallet, rank_index)
+      );
     `);
 
     // ── Migration'lar — mevcut tablolara eksik sütun/tablo ekle ──
     // (CREATE TABLE IF NOT EXISTS mevcut tabloya sütun eklemez, bu yüzden ALTER gerekli)
+    await pool.query(`ALTER TABLE players ALTER COLUMN bullets SET DEFAULT 0;`);
     await pool.query(`ALTER TABLE alliances ADD COLUMN IF NOT EXISTS country_code TEXT;`);
     await pool.query(`ALTER TABLE countries ADD COLUMN IF NOT EXISTS is_superpower BOOLEAN DEFAULT FALSE;`);
 
@@ -454,6 +467,76 @@ export async function loadRecentBulletGrants(limit = 50) {
   } catch (e) {
     console.error("[DB] loadRecentBulletGrants:", e.message);
     return [];
+  }
+}
+
+export async function saveRankClaim({ wallet, rankIndex, deadline }) {
+  const item = {
+    wallet: String(wallet || "").toLowerCase(),
+    rankIndex: Number(rankIndex),
+    deadline: Number(deadline)
+  };
+  if (!item.wallet || !Number.isInteger(item.rankIndex) || !Number.isFinite(item.deadline)) return false;
+  if (!HAS_DB) {
+    rankClaimFallback.set(rankClaimKey(item.wallet, item.rankIndex), item);
+    return true;
+  }
+  try {
+    await pool.query(
+      `INSERT INTO rank_claims (wallet, rank_index, deadline)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (wallet, rank_index) DO UPDATE SET deadline=$3`,
+      [item.wallet, item.rankIndex, item.deadline]
+    );
+    return true;
+  } catch (e) {
+    console.error("[DB] saveRankClaim:", e.message);
+    return false;
+  }
+}
+
+export async function getRankClaim(wallet, rankIndex) {
+  const safeWallet = String(wallet || "").toLowerCase();
+  const safeRank = Number(rankIndex);
+  if (!safeWallet || !Number.isInteger(safeRank)) return null;
+  if (!HAS_DB) return rankClaimFallback.get(rankClaimKey(safeWallet, safeRank)) || null;
+  try {
+    const r = await pool.query(
+      `SELECT wallet, rank_index AS "rankIndex", deadline
+       FROM rank_claims
+       WHERE wallet=$1 AND rank_index=$2
+       LIMIT 1`,
+      [safeWallet, safeRank]
+    );
+    if (!r.rows.length) return null;
+    return {
+      wallet: r.rows[0].wallet,
+      rankIndex: Number(r.rows[0].rankIndex),
+      deadline: Number(r.rows[0].deadline)
+    };
+  } catch (e) {
+    console.error("[DB] getRankClaim:", e.message);
+    return null;
+  }
+}
+
+export async function deleteRankClaim(wallet, rankIndex) {
+  const safeWallet = String(wallet || "").toLowerCase();
+  const safeRank = Number(rankIndex);
+  if (!safeWallet || !Number.isInteger(safeRank)) return false;
+  if (!HAS_DB) {
+    rankClaimFallback.delete(rankClaimKey(safeWallet, safeRank));
+    return true;
+  }
+  try {
+    await pool.query(
+      `DELETE FROM rank_claims WHERE wallet=$1 AND rank_index=$2`,
+      [safeWallet, safeRank]
+    );
+    return true;
+  } catch (e) {
+    console.error("[DB] deleteRankClaim:", e.message);
+    return false;
   }
 }
 

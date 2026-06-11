@@ -216,10 +216,29 @@ const feedbackItems = [];
 // İlk 100 kullanıcı hediye sistemi
 const GIFT_LIMIT = 100;       // İlk kaç kullanıcı bonus alır
 const GIFT_AMOUNT = 100;      // Bonus mermi miktarı
+const NEW_PLAYER_STARTING_BULLETS = 0; // Ayarlanabilir; mevcut DB oyuncularını etkilemez.
 const giftedWallets = new Set(); // Hediye alan cüzdanlar
 const cooldowns = new Map();
+const chatCooldowns = new Map();
+const radioCooldowns = new Map();
 const alliances = new Map();
 const allianceFeed = [];
+
+const dirtyPlayerWallets = new Set();
+const dirtyCountryCodes = new Set();
+function flushDirtyWrites() {
+  for (const w of dirtyPlayerWallets) {
+    const p = players.get(w);
+    if (p) db.savePlayer(p);
+  }
+  for (const c of dirtyCountryCodes) {
+    const k = countries.find(x => x.code === c);
+    if (k) db.saveCountry(k);
+  }
+  dirtyPlayerWallets.clear();
+  dirtyCountryCodes.clear();
+}
+setInterval(flushDirtyWrites, 1500);
 
 function countryHpCap(_country) {
   return MAX_HP;
@@ -767,7 +786,7 @@ function getPlayer(wallet) {
       wallet:id,
       nickname:null,
       country_code:null,
-      bullets:100,
+      bullets:NEW_PLAYER_STARTING_BULLETS,
       contribution:0,
       attacks:0,
       kills:0,
@@ -796,6 +815,7 @@ const RANKS = [
   { min:5000,   name:'Binbaşı',  icon:'⭐⭐⭐',      bonus:0.25 },
   { min:15000,  name:'General',  icon:'⭐⭐⭐⭐',    bonus:0.30 }
 ];
+const RANK_NFT_COSTS = [0, 25, 50, 100, 250, 500, 1000]; // index = rütbe; ayarlanabilir.
 
 function getRank(contribution) {
   let r = RANKS[0];
@@ -841,7 +861,8 @@ function publicRank(rank, index) {
     name: rank.name,
     icon: rank.icon,
     min: rank.min,
-    bonusPct: Math.round((rank.bonus || 0) * 100)
+    bonusPct: Math.round((rank.bonus || 0) * 100),
+    costBullets: RANK_NFT_COSTS[index] || 0
   };
 }
 
@@ -867,8 +888,8 @@ async function hasMintedRankNft(wallet, rankIndex) {
   }
 }
 
-async function createRankNftSignature(wallet, rankIndex) {
-  const deadline = Math.floor((Date.now() + RANK_NFT_CLAIM_TTL_MS) / 1000);
+async function createRankNftSignature(wallet, rankIndex, fixedDeadline) {
+  const deadline = fixedDeadline ? Number(fixedDeadline) : Math.floor((Date.now() + RANK_NFT_CLAIM_TTL_MS) / 1000);
   const digest = ethers.solidityPackedKeccak256(
     ["address", "uint256", "address", "uint8", "uint256"],
     [
@@ -1055,6 +1076,17 @@ function emitState() {
   io.emit("war:state", state());
 }
 
+let stateDirty = false;
+function scheduleStateBroadcast() {
+  stateDirty = true;
+}
+setInterval(() => {
+  if (stateDirty) {
+    stateDirty = false;
+    io.emit("war:state", state());
+  }
+}, 3000);
+
 function addAllianceFeed(type, message, payload={}) {
   const item = { type, message, payload, created_at:Date.now() };
   allianceFeed.unshift(item);
@@ -1213,8 +1245,8 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
       });
     }
 
-    const claimPayload = await createRankNftClaimPayload(wallet, rankIndex);
-    if (claimPayload.status === "owned") {
+    if (await hasMintedRankNft(wallet, rankIndex)) {
+      await db.deleteRankClaim(wallet, rankIndex);
       return res.status(409).json({
         code:"RANK_NFT_ALREADY_MINTED",
         error:"Bu rutbe NFT'si daha once alinmis",
@@ -1222,7 +1254,59 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
       });
     }
 
-    res.json(claimPayload);
+    const savedClaim = await db.getRankClaim(wallet, rankIndex);
+    if (savedClaim && savedClaim.deadline * 1000 > Date.now() + 30000) {
+      const claim = await createRankNftSignature(wallet, rankIndex, savedClaim.deadline);
+      return res.json({
+        ok:true,
+        status:"claimable",
+        wallet,
+        rank: publicRank(rank, rankIndex),
+        chainId: CHAIN.chainId,
+        contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+        signerAddress: rankNftSigner.address,
+        deadline: claim.deadline,
+        signature: claim.signature,
+        charged:false,
+        costBullets: RANK_NFT_COSTS[rankIndex] || 0,
+        player
+      });
+    }
+
+    const cost = RANK_NFT_COSTS[rankIndex] || 0;
+    if (player.bullets < cost) {
+      return res.status(400).json({
+        code:"INSUFFICIENT_BULLETS",
+        error:`Bu rozet icin ${cost} mermi gerekir`,
+        required:cost,
+        bullets:player.bullets
+      });
+    }
+
+    player.bullets -= cost;
+    db.savePlayer(player);
+    const claim = await createRankNftSignature(wallet, rankIndex);
+    const claimSaved = await db.saveRankClaim({ wallet, rankIndex, deadline:claim.deadline });
+    if (!claimSaved) {
+      player.bullets += cost;
+      db.savePlayer(player);
+      return res.status(503).json({ code:"RANK_CLAIM_SAVE_FAILED", error:"Rozet imza kaydi tutulamadi" });
+    }
+
+    res.json({
+      ok:true,
+      status:"claimable",
+      wallet,
+      rank: publicRank(rank, rankIndex),
+      chainId: CHAIN.chainId,
+      contractAddress: ethers.getAddress(RANK_NFT_CONTRACT_ADDRESS),
+      signerAddress: rankNftSigner.address,
+      deadline: claim.deadline,
+      signature: claim.signature,
+      charged:true,
+      costBullets:cost,
+      player
+    });
   } catch (e) {
     res.status(500).json({ code:"RANK_NFT_SIGNATURE_FAILED", error:e.message || "NFT imzasi uretilemedi" });
   }
@@ -1398,7 +1482,7 @@ app.post("/api/player/produce-resource", authRequired, rateLimited, (req,res)=>{
     }
   }
   db.savePlayer(player);
-  emitState();
+  scheduleStateBroadcast();
   res.json({ ok:true, player, bonus });
 });
 
@@ -1541,6 +1625,33 @@ app.post("/api/alliance/leave", authRequired, rateLimited, (req,res)=>{
   res.json({ ok:true, player });
 });
 
+app.post("/api/alliance/chat", authRequired, rateLimited, (req,res)=>{
+  const player = getPlayer(req.wallet);
+  const message = String(req.body.message || "").trim().slice(0, 200);
+  if (!message) return res.status(400).json({ code:"MESSAGE_EMPTY", error:"Mesaj bos" });
+  if (!isCleanText(message)) return res.status(400).json({ code:"MESSAGE_INAPPROPRIATE", error:"Mesaj uygun degil" });
+  if (!player.alliance_id || !alliances.has(player.alliance_id)) {
+    return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"Ittifakta degilsin" });
+  }
+
+  const now = Date.now();
+  const last = chatCooldowns.get(player.wallet) || 0;
+  if (now - last < 2000) {
+    return res.status(429).json({ code:"CHAT_COOLDOWN", error:"Sohbet icin biraz bekle" });
+  }
+  chatCooldowns.set(player.wallet, now);
+
+  const alliance = alliances.get(player.alliance_id);
+  addAllianceFeed("CHAT", message, {
+    allianceId: alliance.id,
+    wallet: player.wallet,
+    nickname: player.nickname,
+    country: player.country_code,
+    message
+  });
+  res.json({ ok:true });
+});
+
 app.post("/api/alliance/radio", authRequired, rateLimited, (req,res)=>{
   if (!validWallet(req.body.wallet)) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const wallet = req.body.wallet;
@@ -1549,15 +1660,18 @@ app.post("/api/alliance/radio", authRequired, rateLimited, (req,res)=>{
 
   const allowed = ["ATTACK_NOW","DEFEND","NEED_SUPPORT","FALL_BACK","ENEMY_DETECTED","PUSH_FINAL","REGROUP","RETREAT","FOCUS_FIRE","SCATTER"];
   if (!allowed.includes(command)) return res.status(400).json({ code:"INVALID_COMMAND", error:"Geçersiz komut" });
-  if (!player.alliance_id) return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"İttifakta değilsin" });
+  if (!player.alliance_id || !alliances.has(player.alliance_id)) return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"İttifakta değilsin" });
+
+  const now = Date.now();
+  const last = radioCooldowns.get(player.wallet) || 0;
+  if (now - last < 15000) {
+    return res.status(429).json({ code:"RADIO_COOLDOWN", error:"Telsiz komutu icin biraz bekle" });
+  }
+  radioCooldowns.set(player.wallet, now);
 
   const alliance = alliances.get(player.alliance_id);
-  alliance.score += 1;
-  persistAlliance(alliance);
-
   const msg = alliance.name + ": " + command;
   addAllianceFeed("RADIO", msg, { allianceId:alliance.id, command, wallet:player.wallet, nickname:player.nickname, country:player.country_code });
-  emitState();
 
   res.json({ ok:true, message:msg });
 });
@@ -1645,9 +1759,9 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   }
 
   // ── KALICILIK: saldıran oyuncu + iki ülke ──
-  db.savePlayer(player);
-  db.saveCountry(target);
-  db.saveCountry(own);
+  dirtyPlayerWallets.add(player.wallet);
+  dirtyCountryCodes.add(target.code);
+  dirtyCountryCodes.add(own.code);
 
   const attack = {
     from_country: own.code,
@@ -1671,7 +1785,7 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   io.emit("war:attack", attack);
   io.emit("hp:update", { target: target.code, newHP: target.hp, maxHP: target.max_hp, isSuperpower: !!target.isSuperpower });
   io.emit("hp:update", { target: own.code, newHP: own.hp, maxHP: own.max_hp, isSuperpower: !!own.isSuperpower });
-  emitState();
+  scheduleStateBroadcast();
 
   res.json({ ok:true, attack, player, newHp: target.hp, damage:damage });
 });
@@ -1847,6 +1961,22 @@ app.post("/api/admin/bullets/grant", adminRequired, async (req,res) => {
   res.json({ ok:true, player, grant:publicGrant });
 });
 
+app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, (req,res) => {
+  const target = normalizeWallet(req.body && req.body.wallet);
+  if (!target) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+
+  const amount = Number(req.body && req.body.amount);
+  if (!Number.isInteger(amount) || amount < 1 || amount > 1000000) {
+    return res.status(400).json({ code:"INVALID_AMOUNT", error:"Gecersiz mermi miktari" });
+  }
+
+  const player = getPlayer(target);
+  player.bullets += amount;
+  db.savePlayer(player);
+  console.log(`[ADMIN] ${req.adminWallet} -> ${target} +${amount} mermi`);
+  res.json({ ok:true, wallet:target, amount, newBalance:player.bullets });
+});
+
 app.get("/api/admin/backup", adminRequired, (_req,res) => {
   res.setHeader("Content-Disposition", `attachment; filename="abswar-backup-${Date.now()}.json"`);
   res.json(adminBackupSnapshot());
@@ -1899,6 +2029,12 @@ io.on("connection", socket=>{
     onlinePlayers = Math.max(0, onlinePlayers - 1);
     io.emit("players:online", { onlinePlayers });
   });
+});
+
+process.on("SIGTERM", ()=>{
+  try { flushDirtyWrites(); } catch(e) {}
+  server.close(()=>process.exit(0));
+  setTimeout(()=>process.exit(0), 3000);
 });
 
 // ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──

@@ -1,4 +1,4 @@
-# ABSWAR Backend
+# Centradar Backend
 
 Mainnet notlari:
 - `ALLOW_DEMO_BUY=false` olmalidir. Demo mermi alimi kapali kalir; gercek alimlar blockchain islemiyle dogrulanir.

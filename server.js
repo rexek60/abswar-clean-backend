@@ -43,7 +43,7 @@ const AUTH_TTL_MS = Number(process.env.AUTH_TTL_MS || 24 * 60 * 60 * 1000);
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 5 * 60 * 1000);
 const ALLOW_DEMO_BUY = (process.env.ALLOW_DEMO_BUY === "true" || process.env.ALLOW_DEMO_PURCHASES === "true") && !IS_MAINNET;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
-  "https://abswar.xyz,https://www.abswar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
+  "https://centradar.xyz,https://www.centradar.xyz,https://abswar.xyz,https://www.abswar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
@@ -487,14 +487,14 @@ function verifySessionToken(token) {
 
 function makeChallengeMessage(wallet, nonce, expiresAt) {
   return [
-    "ABSWAR wallet login",
+    "Centradar wallet login",
     "",
     `Wallet: ${ethers.getAddress(wallet)}`,
     `Network: ${CHAIN.name}`,
     `Nonce: ${nonce}`,
     `Expires: ${new Date(expiresAt).toISOString()}`,
     "",
-    "Only sign this message on abswar.xyz. This does not authorize a blockchain transaction."
+    "Only sign this message on centradar.xyz. This does not authorize a blockchain transaction."
   ].join("\n");
 }
 
@@ -731,7 +731,7 @@ async function verifyAmmoPurchase({ wallet, pack, txHash }) {
   if (receipt.status !== 1) throw apiError("TX_FAILED", "Blockchain islemi basarisiz");
   if (normalizeWallet(tx.from) !== wallet) throw apiError("TX_FROM_MISMATCH", "Islem farkli cuzdan tarafindan gonderildi");
   if (normalizeWallet(tx.to) !== normalizeWallet(ABSWAR_CONTRACT_ADDRESS)) {
-    throw apiError("TX_TO_MISMATCH", "Islem ABSWAR kontratina gitmiyor");
+    throw apiError("TX_TO_MISMATCH", "Islem Centradar kontratina gitmiyor");
   }
   if (String(tx.data || "").toLowerCase() !== BUY_AMMO_SELECTOR) {
     throw apiError("TX_METHOD_MISMATCH", "Islem buyAmmo() cagrisi degil");
@@ -989,7 +989,7 @@ function state() {
 function publicStatus() {
   return {
     ok: true,
-    name: "ABSWAR",
+    name: "Centradar",
     network: NETWORK,
     chainId: CHAIN.chainId,
     uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
@@ -1123,7 +1123,7 @@ function addAllianceFeed(type, message, payload={}) {
   }
 }
 
-app.get("/", (_req,res)=>res.json({ ok:true, name:"ABSWAR Alliance Beta Backend" }));
+app.get("/", (_req,res)=>res.json({ ok:true, name:"Centradar Tactical Gridwar Backend" }));
 app.get("/api/status", (_req,res)=>res.json(publicStatus()));
 app.get("/api/reward/status", (_req,res)=>res.json(rewardStatus()));
 app.get("/health", (_req,res)=>res.json({
@@ -1175,7 +1175,7 @@ async function forwardFeedbackToDiscord(item) {
   const webhookUrl = process.env.DISCORD_FEEDBACK_WEBHOOK_URL || process.env.FEEDBACK_WEBHOOK_URL || "";
   if (!webhookUrl) return;
   const content = [
-    `ABSWAR feedback: ${item.type}`,
+    `Centradar feedback: ${item.type}`,
     `Wallet: ${item.wallet || "not connected"}`,
     `Country: ${item.country || "-"}`,
     `URL: ${item.url || "-"}`,
@@ -1198,7 +1198,7 @@ async function sendDiscordAlert(title, lines = []) {
     || "";
   if (!webhookUrl) return false;
 
-  const safeTitle = String(title || "ABSWAR ALERT").slice(0, 120);
+  const safeTitle = String(title || "CENTRADAR ALERT").slice(0, 120);
   const now = Date.now();
   const last = discordAlertLastSent.get(safeTitle) || 0;
   if (now - last < 60_000) return false;
@@ -1886,7 +1886,7 @@ app.post("/api/admin/reset", adminRequired, (req,res)=>{
   db.saveAllCountries(countries);
   persistRoundState();
   emitState();
-  res.json({ ok:true, message:"ABSWAR alliance beta reset complete" });
+  res.json({ ok:true, message:"Centradar alliance reset complete" });
 });
 
 // ── ADMIN: TUR YÖNETİMİ ─────────────────────────
@@ -2057,7 +2057,7 @@ app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, (req,res
 
 app.get("/api/admin/backup", adminRequired, async (_req,res,next) => {
   try {
-    res.setHeader("Content-Disposition", `attachment; filename="abswar-backup-${Date.now()}.json"`);
+    res.setHeader("Content-Disposition", `attachment; filename="centradar-backup-${Date.now()}.json"`);
     res.json(await adminBackupSnapshot());
   } catch (e) {
     next(e);
@@ -2206,7 +2206,7 @@ async function bootstrap() {
   }
 
   server.listen(PORT, ()=>{
-    console.log("ABSWAR ALLIANCE BETA BACKEND RUNNING ON PORT " + PORT);
+    console.log("CENTRADAR TACTICAL GRIDWAR BACKEND RUNNING ON PORT " + PORT);
     console.log("[DB] Durum:", db.dbEnabled ? "PostgreSQL aktif" : "Bellek modu");
   });
 }

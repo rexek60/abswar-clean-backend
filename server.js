@@ -6,6 +6,14 @@ import { Server } from "socket.io";
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { ethers } from "ethers";
 import * as db from "./db.js";
+import {
+  BANNED_WORDS,
+  RANKS,
+  RANK_NFT_COSTS,
+  getRank,
+  getNextRank,
+  isCleanText
+} from "./lib/rules.js";
 
 dotenv.config();
 
@@ -366,6 +374,19 @@ function endRound() {
   };
   io.emit('round:ended', lastRoundResult);
   persistRoundState();
+  try {
+    const economy = economyState();
+    const winnerLines = winners.slice(0, 3).map(w =>
+      `${w.rank}. ${w.flag || ""} ${w.countryName || w.country} - %${w.sharePct} - top: ${w.topPlayer || "-"}`
+    );
+    sendDiscordAlert(`🏁 TUR ${roundNumber} BİTTİ — ödeme bekleniyor`, [
+      ...winnerLines,
+      `Ödül havuzu: ${economy.rewardPoolEth || "0"} ETH`,
+      `Top oyuncular: ${winners.map(w => w.topPlayer).filter(Boolean).join(", ") || "-"}`
+    ]).catch(e => console.warn("[ROUND] Discord alert failed:", e.message));
+  } catch (e) {
+    console.warn("[ROUND] Discord alert skipped:", e.message);
+  }
   console.log(`[ROUND ${roundNumber}] BİTTİ — Kazananlar:`, winners.map(w=>`${w.flag} ${w.country} (${w.sharePct}%)`).join(' | '));
 }
 
@@ -486,6 +507,19 @@ function authRequired(req, res, next) {
   next();
 }
 
+function allianceRoomId(allianceId) {
+  return `alliance:${String(allianceId || "")}`;
+}
+
+function socketSession(socket) {
+  const token = socket && socket.handshake && socket.handshake.auth && socket.handshake.auth.token;
+  const session = verifySessionToken(token);
+  if (!session) return null;
+  const player = players.get(session.wallet);
+  const allianceId = player && player.alliance_id && alliances.has(player.alliance_id) ? player.alliance_id : null;
+  return { wallet:session.wallet, allianceId };
+}
+
 // --- CHAIN PAYMENT VERIFICATION ---
 const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
 const BUY_AMMO_SELECTOR = "0x499eb3de";
@@ -574,6 +608,20 @@ function walletDepositPublicItem(row) {
     rewardWei,
     rewardEth: ethers.formatEther(rewardWei),
     lastPurchaseAt: Number(row.lastPurchaseAt || row.last_purchase_at) || 0
+  };
+}
+
+function purchaseBackupItem(purchase) {
+  const item = purchasePublicItem(purchase);
+  return {
+    tx_hash: item.txHash,
+    wallet: item.wallet,
+    pack: item.pack,
+    bullets: item.bullets,
+    value_wei: item.valueWei,
+    chain_id: item.chainId,
+    block_number: item.blockNumber,
+    created_at: item.createdAt
   };
 }
 
@@ -745,23 +793,6 @@ function checkRateLimit(key) {
   return r.count <= RATE_LIMIT_MAX;
 }
 
-// Yasaklı/küfür kelime filtresi (basit)
-// Küfür / kötü kullanım filtresi
-// Önemli: 'aq', 'oç' gibi kısa parçalar "Yaqar", "Boçak" gibi normal isimlere
-// substring olarak takılıyordu. Şimdi tam kelime eşleşmesi yapıyoruz.
-const BANNED_WORDS = ['orospu','siktir','amına','anandan','anasını','allahını','piçkurusu','admin','official','anthropic','claude','moderator','sistem'];
-function isCleanText(text) {
-  if (!text || typeof text !== 'string') return false;
-  const lower = text.toLowerCase();
-  // Tam kelime veya kelime başında/sonunda kontrol (substring değil)
-  // Boşluk veya kelime sınırlarıyla ayrılmış olmalı
-  for (const w of BANNED_WORDS) {
-    const re = new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`, 'i');
-    if (re.test(text)) return false;
-  }
-  return true;
-}
-
 function validWallet(w) {
   return !!normalizeWallet(w);
 }
@@ -803,33 +834,6 @@ function getPlayer(wallet) {
     });
   }
   return players.get(id);
-}
-
-/* ── RÜTBE SİSTEMİ ── */
-const RANKS = [
-  { min:0,      name:'Asker',    icon:'🪖',          bonus:0   },
-  { min:50,     name:'Onbaşı',   icon:'🎖',          bonus:0.05 },
-  { min:200,    name:'Çavuş',    icon:'🎖🎖',        bonus:0.10 },
-  { min:500,    name:'Teğmen',   icon:'⭐',          bonus:0.15 },
-  { min:1500,   name:'Yüzbaşı',  icon:'⭐⭐',        bonus:0.20 },
-  { min:5000,   name:'Binbaşı',  icon:'⭐⭐⭐',      bonus:0.25 },
-  { min:15000,  name:'General',  icon:'⭐⭐⭐⭐',    bonus:0.30 }
-];
-const RANK_NFT_COSTS = [0, 25, 50, 100, 250, 500, 1000]; // index = rütbe; ayarlanabilir.
-
-function getRank(contribution) {
-  let r = RANKS[0];
-  for (const rank of RANKS) {
-    if (contribution >= rank.min) r = rank;
-  }
-  return r;
-}
-
-function getNextRank(contribution) {
-  for (const rank of RANKS) {
-    if (contribution < rank.min) return rank;
-  }
-  return null; // En yüksek rütbedeyiz
 }
 
 // --- RANK NFT CLAIMS ---
@@ -955,7 +959,7 @@ function state() {
     giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size),
     leaderboard,
     alliances: allianceList,
-    allianceFeed,
+    allianceFeed: [],
     economy: economyState(),
     round: {
       number: roundNumber,
@@ -1011,7 +1015,19 @@ function publicStatus() {
   };
 }
 
-function adminBackupSnapshot() {
+async function adminBackupSnapshot() {
+  const purchases = db.dbEnabled
+    ? await db.loadAllPurchases()
+    : memoryPurchaseList.slice().reverse().map(purchaseBackupItem);
+  const gameState = {
+    round: {
+      roundNumber,
+      roundStatus,
+      roundStartTime,
+      roundEndTime,
+      lastRoundResult
+    }
+  };
   return {
     ok: true,
     generatedAt: Date.now(),
@@ -1025,13 +1041,16 @@ function adminBackupSnapshot() {
       endTime: roundEndTime,
       lastResult: lastRoundResult
     },
+    game_state: gameState,
     economy: economyState(),
     countries,
     players: [...players.values()],
     alliances: [...alliances.values()].map(publicAlliance),
     recentAttacks,
     allianceFeed,
+    gifted_wallets: [...giftedWallets],
     giftedWallets: [...giftedWallets],
+    purchases,
     feedback: feedbackItems.map(feedbackPublicItem),
     rankNft: rankNftPublicState()
   };
@@ -1091,7 +1110,10 @@ function addAllianceFeed(type, message, payload={}) {
   const item = { type, message, payload, created_at:Date.now() };
   allianceFeed.unshift(item);
   if (allianceFeed.length > 30) allianceFeed.pop();
-  io.emit("alliance:feed", item);
+  const allianceId = payload && payload.allianceId;
+  if (allianceId && alliances.has(allianceId)) {
+    io.to(allianceRoomId(allianceId)).emit("alliance:feed", item);
+  }
 }
 
 app.get("/", (_req,res)=>res.json({ ok:true, name:"ABSWAR Alliance Beta Backend" }));
@@ -1115,6 +1137,18 @@ app.get("/health", (_req,res)=>res.json({
   rankNft: rankNftPublicState()
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
+
+app.get("/api/alliance/feed", authRequired, (req,res) => {
+  const player = players.get(req.wallet);
+  if (!player || !player.alliance_id || !alliances.has(player.alliance_id)) {
+    return res.json({ ok:true, feed:[] });
+  }
+  const feed = allianceFeed
+    .filter(item => item && item.payload && item.payload.allianceId === player.alliance_id)
+    .slice()
+    .reverse();
+  res.json({ ok:true, feed });
+});
 
 const FEEDBACK_TYPES = new Set(["bug", "idea", "praise", "other"]);
 function feedbackPublicItem(item) {
@@ -1147,6 +1181,43 @@ async function forwardFeedbackToDiscord(item) {
     body: JSON.stringify({ content })
   });
 }
+
+const discordAlertLastSent = new Map();
+
+async function sendDiscordAlert(title, lines = []) {
+  const webhookUrl = process.env.DISCORD_ALERT_WEBHOOK_URL
+    || process.env.DISCORD_FEEDBACK_WEBHOOK_URL
+    || process.env.FEEDBACK_WEBHOOK_URL
+    || "";
+  if (!webhookUrl) return false;
+
+  const safeTitle = String(title || "ABSWAR ALERT").slice(0, 120);
+  const now = Date.now();
+  const last = discordAlertLastSent.get(safeTitle) || 0;
+  if (now - last < 60_000) return false;
+  discordAlertLastSent.set(safeTitle, now);
+
+  const content = [
+    safeTitle,
+    ...lines.map(line => String(line || "").slice(0, 350))
+  ].filter(Boolean).join("\n").slice(0, 1900);
+
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content })
+    });
+    return res.ok;
+  } catch (e) {
+    console.warn("[ALERT] Discord webhook failed:", e.message);
+    return false;
+  }
+}
+
+db.setAlertHook((title, lines) => {
+  sendDiscordAlert(title, lines).catch(e => console.warn("[ALERT] DB hook failed:", e.message));
+});
 
 app.post("/api/feedback", rateLimited, async (req,res,next)=>{
   try {
@@ -1563,7 +1634,7 @@ app.post("/api/alliance/create", authRequired, rateLimited, (req,res)=>{
   persistAlliance(alliance);
   db.savePlayer(player);
 
-  addAllianceFeed("CREATE", name + " alliance kuruldu", { id, wallet:player.wallet });
+  addAllianceFeed("CREATE", name + " alliance kuruldu", { id, allianceId:id, wallet:player.wallet });
   emitState();
 
   res.json({ ok:true, alliance:publicAlliance(alliance), player });
@@ -1977,9 +2048,13 @@ app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, (req,res
   res.json({ ok:true, wallet:target, amount, newBalance:player.bullets });
 });
 
-app.get("/api/admin/backup", adminRequired, (_req,res) => {
-  res.setHeader("Content-Disposition", `attachment; filename="abswar-backup-${Date.now()}.json"`);
-  res.json(adminBackupSnapshot());
+app.get("/api/admin/backup", adminRequired, async (_req,res,next) => {
+  try {
+    res.setHeader("Content-Disposition", `attachment; filename="abswar-backup-${Date.now()}.json"`);
+    res.json(await adminBackupSnapshot());
+  } catch (e) {
+    next(e);
+  }
 });
 
 app.post("/api/admin/round/payout-log", adminRequired, (req,res) => {
@@ -2022,6 +2097,12 @@ app.post("/api/admin/round/start", adminRequired, (req,res) => {
 
 io.on("connection", socket=>{
   onlinePlayers++;
+  const session = socketSession(socket);
+  if (session) {
+    socket.data.wallet = session.wallet;
+    socket.data.allianceId = session.allianceId;
+    if (session.allianceId) socket.join(allianceRoomId(session.allianceId));
+  }
   io.emit("players:online", { onlinePlayers });
   socket.emit("war:state", state());
 
@@ -2040,6 +2121,13 @@ process.on("SIGTERM", ()=>{
 // ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──
 app.use((err, _req, res, _next) => {
   console.error("[SERVER_ERROR]", err && (err.stack || err.message || err));
+  try {
+    const stackLines = String(err && err.stack || "").split("\n").slice(0, 3);
+    sendDiscordAlert("🔥 SERVER_ERROR", [
+      String(err && err.message || err || "Unknown error"),
+      ...stackLines
+    ]).catch(e => console.warn("[SERVER_ERROR] Discord alert failed:", e.message));
+  } catch {}
   if (res.headersSent) return;
   res.status(500).json({ code:"SERVER_ERROR", error:"Beklenmeyen sunucu hatasi" });
 });

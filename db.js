@@ -47,9 +47,19 @@ const pgConfig = buildPgConfig();
 const HAS_DB = !!pgConfig;
 
 let pool = null;
+let alertHook = null;
+
+export function setAlertHook(fn) {
+  alertHook = typeof fn === "function" ? fn : null;
+}
 if (HAS_DB) {
   pool = new Pool(pgConfig);
-  pool.on("error", (err) => console.error("[DB] Pool error:", err.message));
+  pool.on("error", (err) => {
+    console.error("[DB] Pool error:", err.message);
+    try {
+      if (alertHook) alertHook("🗄️ DB POOL ERROR", [err.message]);
+    } catch {}
+  });
   console.log("[DB] Bağlantı yapılandırması hazır (" +
     (process.env.DATABASE_URL ? "DATABASE_URL" : "PG parçaları") + ")");
 }
@@ -231,7 +241,7 @@ export async function loadAll() {
 
 export function savePlayer(p) {
   if (!HAS_DB || !p) return;
-  pool.query(
+  return pool.query(
     `INSERT INTO players (wallet,nickname,country_code,bullets,contribution,attacks,kills,deaths,radar_level,resources,alliance_id,gifted,created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (wallet) DO UPDATE SET
@@ -245,7 +255,7 @@ export function savePlayer(p) {
 
 export function saveAlliance(a) {
   if (!HAS_DB || !a) return;
-  pool.query(
+  return pool.query(
     `INSERT INTO alliances (id,name,leader,country_code,members,score,created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7)
      ON CONFLICT (id) DO UPDATE SET name=$2, leader=$3, country_code=$4, members=$5, score=$6`,
@@ -261,7 +271,7 @@ export function deleteAlliance(id) {
 
 export function saveCountry(c) {
   if (!HAS_DB || !c) return;
-  pool.query(
+  return pool.query(
     `INSERT INTO countries (code,hp,max_hp,eliminated,is_superpower)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (code) DO UPDATE SET hp=$2, max_hp=$3, eliminated=$4, is_superpower=$5`,
@@ -272,12 +282,12 @@ export function saveCountry(c) {
 // Tüm ülkeleri toplu kaydet (tur başlangıcı / reset)
 export function saveAllCountries(countries) {
   if (!HAS_DB) return;
-  for (const c of countries) saveCountry(c);
+  return Promise.all((countries || []).map(c => saveCountry(c)));
 }
 
 export function saveGameState(key, value) {
   if (!HAS_DB) return;
-  pool.query(
+  return pool.query(
     `INSERT INTO game_state (key,value) VALUES ($1,$2)
      ON CONFLICT (key) DO UPDATE SET value=$2`,
     [key, JSON.stringify(value)]
@@ -318,7 +328,7 @@ export async function loadRecentAttacks(limit = 100) {
 
 export function addGiftedWallet(wallet) {
   if (!HAS_DB) return;
-  pool.query("INSERT INTO gifted_wallets (wallet) VALUES ($1) ON CONFLICT DO NOTHING", [wallet])
+  return pool.query("INSERT INTO gifted_wallets (wallet) VALUES ($1) ON CONFLICT DO NOTHING", [wallet])
     .catch(e => console.error("[DB] addGiftedWallet:", e.message));
 }
 
@@ -391,6 +401,38 @@ export async function loadRecentPurchases(limit = 50) {
     return r.rows;
   } catch (e) {
     console.error("[DB] loadRecentPurchases:", e.message);
+    return [];
+  }
+}
+
+export async function loadAllPurchases() {
+  if (!HAS_DB) return [];
+  try {
+    const r = await pool.query(`
+      SELECT
+        tx_hash,
+        wallet,
+        pack,
+        bullets,
+        value_wei,
+        chain_id,
+        block_number,
+        created_at
+      FROM purchases
+      ORDER BY created_at ASC
+    `);
+    return r.rows.map(row => ({
+      tx_hash: row.tx_hash,
+      wallet: row.wallet,
+      pack: Number(row.pack) || 0,
+      bullets: Number(row.bullets) || 0,
+      value_wei: String(row.value_wei || "0"),
+      chain_id: Number(row.chain_id) || 0,
+      block_number: row.block_number == null ? null : Number(row.block_number),
+      created_at: Number(row.created_at) || 0
+    }));
+  } catch (e) {
+    console.error("[DB] loadAllPurchases:", e.message);
     return [];
   }
 }
@@ -541,14 +583,22 @@ export async function deleteRankClaim(wallet, rankIndex) {
 }
 
 // Tam reset (admin)
-export async function wipeAll() {
+export async function wipeAll(options = {}) {
   if (!HAS_DB) return;
   try {
-    await pool.query("TRUNCATE players, alliances, gifted_wallets, recent_attacks");
+    const tables = ["players", "alliances", "gifted_wallets", "recent_attacks"];
+    if (options && options.purchases) {
+      tables.push("purchases", "admin_bullet_grants", "rank_claims");
+    }
+    await pool.query(`TRUNCATE ${tables.join(", ")}`);
     await pool.query("DELETE FROM game_state");
     // countries silinmez — HP'leri reset endpoint'i güncelleyecek
     console.log("[DB] Tüm veriler silindi (reset)");
   } catch (e) {
     console.error("[DB] wipeAll:", e.message);
   }
+}
+
+export async function closePool() {
+  if (pool) await pool.end();
 }

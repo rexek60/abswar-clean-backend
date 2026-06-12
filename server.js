@@ -424,6 +424,13 @@ setInterval(() => {
 // --- AUTH / WALLET OWNERSHIP ---
 const authChallenges = new Map();
 
+setInterval(() => {
+  const now = Date.now();
+  for (const [wallet, challenge] of authChallenges) {
+    if (!challenge || challenge.expiresAt < now) authChallenges.delete(wallet);
+  }
+}, 60 * 1000);
+
 function normalizeWallet(w) {
   if (typeof w !== "string") return null;
   try {
@@ -1885,7 +1892,7 @@ app.post("/api/admin/reset", adminRequired, (req,res)=>{
 // ── ADMIN: TUR YÖNETİMİ ─────────────────────────
 function checkAdmin(req) {
   const token = req.headers['x-admin-token'] || (req.body && req.body.token);
-  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) return false;
+  if (!ADMIN_TOKEN || !safeEq(token || "", ADMIN_TOKEN)) return false;
   const header = req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const session = verifySessionToken(bearer);

@@ -1111,7 +1111,7 @@ function addAllianceFeed(type, message, payload={}) {
   allianceFeed.unshift(item);
   if (allianceFeed.length > 30) allianceFeed.pop();
   const allianceId = payload && payload.allianceId;
-  if (allianceId && alliances.has(allianceId)) {
+  if (allianceId) {
     io.to(allianceRoomId(allianceId)).emit("alliance:feed", item);
   }
 }

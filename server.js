@@ -43,7 +43,7 @@ const AUTH_TTL_MS = Number(process.env.AUTH_TTL_MS || 24 * 60 * 60 * 1000);
 const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 5 * 60 * 1000);
 const ALLOW_DEMO_BUY = (process.env.ALLOW_DEMO_BUY === "true" || process.env.ALLOW_DEMO_PURCHASES === "true") && !IS_MAINNET;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
-  "https://centradar.xyz,https://www.centradar.xyz,https://abswar.xyz,https://www.abswar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
+  "https://centradar.xyz,https://www.centradar.xyz,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
@@ -530,6 +530,7 @@ function socketSession(socket) {
 // --- CHAIN PAYMENT VERIFICATION ---
 const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
 const BUY_AMMO_SELECTOR = "0x499eb3de";
+const REWARD_POOL_SELECTOR = "0x66666aa9";
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
 const signatureInterface = new ethers.Interface([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)"
@@ -549,6 +550,7 @@ const memoryBulletGrants = [];
 const MAX_ADMIN_BULLET_GRANT = Math.max(1, Number(process.env.ADMIN_BULLET_GRANT_MAX || 100000));
 const MAX_PLAYER_BULLETS = 2147483647;
 let purchaseTotals = { purchaseCount:0, totalBullets:0, totalWei:"0" };
+let onchainRewardPoolWei = 0n;
 
 function setPurchaseTotals(totals={}) {
   purchaseTotals = {
@@ -668,9 +670,24 @@ function memoryWalletDepositTotals() {
   });
 }
 
+async function refreshOnchainRewardPool() {
+  if (!ethers.isAddress(ABSWAR_CONTRACT_ADDRESS)) return;
+  try {
+    const result = await provider.call({
+      to: ethers.getAddress(ABSWAR_CONTRACT_ADDRESS),
+      data: REWARD_POOL_SELECTOR
+    });
+    if (result && result !== "0x") onchainRewardPoolWei = BigInt(result);
+  } catch (e) {
+    console.warn("[CHAIN] Odul havuzu okunamadi:", e.message);
+  }
+}
+
 function economyState() {
-  const totalWei = BigInt(purchaseTotals.totalWei || "0");
-  const rewardPoolWei = (totalWei * 70n) / 100n;
+  const recordedTotalWei = BigInt(purchaseTotals.totalWei || "0");
+  const recordedRewardPoolWei = (recordedTotalWei * 70n) / 100n;
+  const rewardPoolWei = onchainRewardPoolWei > recordedRewardPoolWei ? onchainRewardPoolWei : recordedRewardPoolWei;
+  const totalWei = recordedTotalWei > 0n ? recordedTotalWei : (rewardPoolWei * 100n) / 70n;
   return {
     purchaseCount: purchaseTotals.purchaseCount,
     totalBullets: purchaseTotals.totalBullets,
@@ -1144,6 +1161,14 @@ app.get("/health", (_req,res)=>res.json({
   rankNft: rankNftPublicState()
 }));
 app.get("/api/game/state", (_req,res)=>res.json(state()));
+app.get("/api/health", (_req,res)=>res.json({
+  ok: true,
+  status: "online",
+  onlinePlayers,
+  dbEnabled: db.dbEnabled,
+  uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
+  buildAt: new Date(SERVICE_STARTED_AT).toISOString()
+}));
 
 app.get("/api/alliance/feed", authRequired, (req,res) => {
   const player = players.get(req.wallet);
@@ -1996,7 +2021,7 @@ app.get("/api/admin/purchases", adminRequired, async (req,res) => {
   });
 });
 
-app.post("/api/admin/bullets/grant", adminRequired, async (req,res) => {
+app.post("/api/admin/bullets/grant", adminRequired, rateLimited, async (req,res) => {
   const targetWallet = normalizeWallet(req.body && req.body.wallet);
   const requestedBullets = Math.trunc(Number(req.body && (req.body.bullets ?? req.body.amount)));
   const reason = String(req.body && req.body.reason || "").trim().slice(0, 120);
@@ -2039,20 +2064,48 @@ app.post("/api/admin/bullets/grant", adminRequired, async (req,res) => {
   res.json({ ok:true, player, grant:publicGrant });
 });
 
-app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, (req,res) => {
+app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, async (req,res) => {
   const target = normalizeWallet(req.body && req.body.wallet);
   if (!target) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
 
-  const amount = Number(req.body && req.body.amount);
-  if (!Number.isInteger(amount) || amount < 1 || amount > 1000000) {
+  const amount = Math.trunc(Number(req.body && req.body.amount));
+  const reason = String(req.body && req.body.reason || "").trim().slice(0, 120);
+  if (!Number.isSafeInteger(amount) || amount < 1) {
     return res.status(400).json({ code:"INVALID_AMOUNT", error:"Gecersiz mermi miktari" });
+  }
+  if (amount > MAX_ADMIN_BULLET_GRANT) {
+    return res.status(400).json({
+      code:"ADMIN_BULLET_GRANT_LIMIT",
+      error:`Tek seferde en fazla ${MAX_ADMIN_BULLET_GRANT} mermi verilebilir`
+    });
   }
 
   const player = getPlayer(target);
-  player.bullets += amount;
+  const before = Number(player.bullets) || 0;
+  const after = Math.min(MAX_PLAYER_BULLETS, before + amount);
+  const added = after - before;
+  if (added < 1) {
+    return res.status(400).json({ code:"PLAYER_BULLET_CAP", error:"Oyuncu mermi sinirinda" });
+  }
+
+  player.bullets = after;
   db.savePlayer(player);
-  console.log(`[ADMIN] ${req.adminWallet} -> ${target} +${amount} mermi`);
-  res.json({ ok:true, wallet:target, amount, newBalance:player.bullets });
+
+  const grant = {
+    wallet: player.wallet,
+    bullets: added,
+    reason,
+    adminWallet: req.adminWallet,
+    createdAt: Date.now()
+  };
+  rememberBulletGrant(grant);
+  await db.recordBulletGrant(grant);
+
+  const publicGrant = bulletGrantPublicItem(grant);
+  io.emit("admin:bullet-grant", publicGrant);
+  emitState();
+  console.log(`[ADMIN] ${req.adminWallet} -> ${target} +${added} mermi`);
+  res.json({ ok:true, wallet:target, amount:added, newBalance:player.bullets, player, grant:publicGrant });
 });
 
 app.get("/api/admin/backup", adminRequired, async (_req,res,next) => {
@@ -2205,8 +2258,11 @@ async function bootstrap() {
     console.error("[DB] Satin alma ozeti yuklenemedi:", e.message);
   }
 
-  server.listen(PORT, ()=>{
-    console.log("CENTRADAR TACTICAL GRIDWAR BACKEND RUNNING ON PORT " + PORT);
+  await refreshOnchainRewardPool();
+  setInterval(refreshOnchainRewardPool, 60 * 1000);
+
+  server.listen(PORT, "0.0.0.0", ()=>{
+    console.log(`🟢 CENTRADAR BACKEND ONLINE — port ${PORT} — build ${new Date(SERVICE_STARTED_AT).toISOString()}`);
     console.log("[DB] Durum:", db.dbEnabled ? "PostgreSQL aktif" : "Bellek modu");
   });
 }

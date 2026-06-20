@@ -85,7 +85,14 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: "64kb" }));
 
 const io = new Server(server, {
-  cors: { origin: corsOrigin, credentials: true }
+  cors: { origin: corsOrigin, credentials: true },
+  transports: ["websocket"],
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 120000,
+    skipMiddlewares: true
+  }
 });
 
 let onlinePlayers = 0;
@@ -2165,6 +2172,10 @@ io.on("connection", socket=>{
   }
   io.emit("players:online", { onlinePlayers });
   socket.emit("war:state", state());
+
+  socket.on("heartbeat", ()=>{
+    socket.data.lastSeen = Date.now();
+  });
 
   socket.on("disconnect", ()=>{
     onlinePlayers = Math.max(0, onlinePlayers - 1);

@@ -539,8 +539,12 @@ const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
 const BUY_AMMO_SELECTOR = "0x499eb3de";
 const REWARD_POOL_SELECTOR = "0x66666aa9";
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
+const AGW_FACTORY_ADDRESS = process.env.AGW_FACTORY_ADDRESS || "0xe86Bf72715dF28a0b7c3C8F596E7fE05a22A139c";
 const signatureInterface = new ethers.Interface([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)"
+]);
+const agwFactoryInterface = new ethers.Interface([
+  "function getAddressForSalt(bytes32 salt) view returns (address)"
 ]);
 const ammoInterface = new ethers.Interface([
   "event AmmoPurchased(address indexed buyer, uint256 amount, uint256 ethPaid)"
@@ -712,24 +716,48 @@ function apiError(code, message, status = 400) {
   return e;
 }
 
-async function verifyWalletMessage(wallet, message, signature) {
+async function getAgwAddressFromInitialSigner(signerWallet) {
+  if (!ethers.isAddress(AGW_FACTORY_ADDRESS) || !signerWallet) return null;
   try {
-    if (normalizeWallet(ethers.verifyMessage(message, signature)) === wallet) return true;
+    const salt = ethers.keccak256(ethers.getBytes(ethers.getAddress(signerWallet)));
+    const data = agwFactoryInterface.encodeFunctionData("getAddressForSalt", [salt]);
+    const result = await provider.call({ to: AGW_FACTORY_ADDRESS, data });
+    const [smartAccount] = agwFactoryInterface.decodeFunctionResult("getAddressForSalt", result);
+    return normalizeWallet(smartAccount);
+  } catch {
+    return null;
+  }
+}
+
+async function verifyWalletMessage(wallet, message, signature, signerWallet=null) {
+  let recovered = null;
+  try {
+    recovered = normalizeWallet(ethers.verifyMessage(message, signature));
+    if (recovered === wallet) return true;
   } catch {}
 
   try {
     const code = await provider.getCode(wallet);
-    if (!code || code === "0x") return false;
-    const data = signatureInterface.encodeFunctionData("isValidSignature", [
-      ethers.hashMessage(message),
-      signature
-    ]);
-    const result = await provider.call({ to: wallet, data });
-    const [magicValue] = signatureInterface.decodeFunctionResult("isValidSignature", result);
-    return String(magicValue).toLowerCase() === ERC1271_MAGIC_VALUE;
+    if (code && code !== "0x") {
+      const data = signatureInterface.encodeFunctionData("isValidSignature", [
+        ethers.hashMessage(message),
+        signature
+      ]);
+      const result = await provider.call({ to: wallet, data });
+      const [magicValue] = signatureInterface.decodeFunctionResult("isValidSignature", result);
+      if (String(magicValue).toLowerCase() === ERC1271_MAGIC_VALUE) return true;
+    }
   } catch {
-    return false;
+    // Counterfactual AGW accounts may not have code yet. In that case,
+    // accept only the documented signer EOA if it deterministically maps to this AGW.
   }
+
+  const signer = normalizeWallet(signerWallet);
+  if (signer && recovered && recovered === signer) {
+    return await getAgwAddressFromInitialSigner(signer) === wallet;
+  }
+
+  return false;
 }
 
 async function verifyAmmoPurchase({ wallet, pack, txHash }) {
@@ -1297,6 +1325,7 @@ app.post("/api/auth/challenge", rateLimited, (req,res)=>{
 
 app.post("/api/auth/verify", rateLimited, async (req,res)=>{
   const wallet = normalizeWallet(req.body && req.body.wallet);
+  const signerWallet = normalizeWallet(req.body && (req.body.signerWallet || req.body.signerAddress));
   const signature = req.body && req.body.signature;
   const message = req.body && req.body.message;
   if (!wallet || typeof signature !== "string" || typeof message !== "string") {
@@ -1311,7 +1340,7 @@ app.post("/api/auth/verify", rateLimited, async (req,res)=>{
     return res.status(401).json({ code:"CHALLENGE_MISMATCH", error:"Giris mesaji eslesmiyor" });
   }
   try {
-    if (!await verifyWalletMessage(wallet, message, signature)) {
+    if (!await verifyWalletMessage(wallet, message, signature, signerWallet)) {
       return res.status(401).json({ code:"SIGNATURE_MISMATCH", error:"Imza cuzdanla eslesmiyor" });
     }
     authChallenges.delete(wallet);

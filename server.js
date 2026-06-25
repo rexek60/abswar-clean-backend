@@ -541,7 +541,13 @@ const provider = new ethers.JsonRpcProvider(ABSWAR_RPC_URL, CHAIN.chainId);
 const BUY_AMMO_SELECTOR = "0x499eb3de";
 const REWARD_POOL_SELECTOR = "0x66666aa9";
 const ERC1271_MAGIC_VALUE = "0x1626ba7e";
-const AGW_FACTORY_ADDRESS = process.env.AGW_FACTORY_ADDRESS || "0xe86Bf72715dF28a0b7c3C8F596E7fE05a22A139c";
+const DEFAULT_AGW_FACTORY_ADDRESS = "0x9B947df68D35281C972511B3E7BC875926f26C1A";
+const LEGACY_AGW_FACTORY_ADDRESS = "0xe86Bf72715dF28a0b7c3C8F596E7fE05a22A139c";
+const AGW_FACTORY_ADDRESSES = [...new Set([
+  process.env.AGW_FACTORY_ADDRESS,
+  DEFAULT_AGW_FACTORY_ADDRESS,
+  LEGACY_AGW_FACTORY_ADDRESS
+].filter(address => ethers.isAddress(address)).map(address => ethers.getAddress(address)))];
 const signatureInterface = new ethers.Interface([
   "function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)"
 ]);
@@ -719,16 +725,18 @@ function apiError(code, message, status = 400) {
 }
 
 async function getAgwAddressFromInitialSigner(signerWallet) {
-  if (!ethers.isAddress(AGW_FACTORY_ADDRESS) || !signerWallet) return null;
-  try {
-    const salt = ethers.keccak256(ethers.getBytes(ethers.getAddress(signerWallet)));
-    const data = agwFactoryInterface.encodeFunctionData("getAddressForSalt", [salt]);
-    const result = await provider.call({ to: AGW_FACTORY_ADDRESS, data });
-    const [smartAccount] = agwFactoryInterface.decodeFunctionResult("getAddressForSalt", result);
-    return normalizeWallet(smartAccount);
-  } catch {
-    return null;
+  if (!signerWallet || !AGW_FACTORY_ADDRESSES.length) return null;
+  const salt = ethers.keccak256(ethers.getBytes(ethers.getAddress(signerWallet)));
+  const data = agwFactoryInterface.encodeFunctionData("getAddressForSalt", [salt]);
+  for (const factoryAddress of AGW_FACTORY_ADDRESSES) {
+    try {
+      const result = await provider.call({ to: factoryAddress, data });
+      const [smartAccount] = agwFactoryInterface.decodeFunctionResult("getAddressForSalt", result);
+      const wallet = normalizeWallet(smartAccount);
+      if (wallet) return wallet;
+    } catch {}
   }
+  return null;
 }
 
 async function verifyWalletMessage(wallet, message, signature, signerWallet=null) {

@@ -86,9 +86,11 @@ app.use(express.json({ limit: "64kb" }));
 
 const io = new Server(server, {
   cors: { origin: corsOrigin, credentials: true },
-  transports: ["websocket"],
-  pingInterval: 25000,
-  pingTimeout: 60000,
+  transports: ["polling", "websocket"],   // polling ile başla, websocket'e upgrade et — proxy arkasında güvenli fallback
+  pingInterval: 20000,
+  pingTimeout: 25000,                       // Railway idle timeout altında tut, ölü bağlantıyı hızlı tespit et
+  upgradeTimeout: 30000,
+  allowUpgrades: true,
   connectionStateRecovery: {
     maxDisconnectionDuration: 120000,
     skipMiddlewares: true

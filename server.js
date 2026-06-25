@@ -86,11 +86,11 @@ app.use(express.json({ limit: "64kb" }));
 
 const io = new Server(server, {
   cors: { origin: corsOrigin, credentials: true },
-  transports: ["polling", "websocket"],   // polling ile başla, websocket'e upgrade et — proxy arkasında güvenli fallback
+  transports: ["polling", "websocket"],   // server iki transportu da kabul etsin; client seçer
   pingInterval: 20000,
-  pingTimeout: 25000,                       // Railway idle timeout altında tut, ölü bağlantıyı hızlı tespit et
+  pingTimeout: 25000,                       // toplam 45s < Railway ~60s idle eşiği -> "transport close" önlenir
   upgradeTimeout: 30000,
-  allowUpgrades: true,
+  perMessageDeflate: false,                 // Railway proxy'de TCP_OVERWIN pencere hatasını önler
   connectionStateRecovery: {
     maxDisconnectionDuration: 120000,
     skipMiddlewares: true

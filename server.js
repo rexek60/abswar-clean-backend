@@ -98,6 +98,50 @@ const io = new Server(server, {
 });
 
 let onlinePlayers = 0;
+const onlinePresence = new Map();
+const ONLINE_PRESENCE_GRACE_MS = 8000;
+
+function socketPresenceKey(socket, session) {
+  const rawClientId = String(socket.handshake?.auth?.clientId || "").trim();
+  if (/^[a-zA-Z0-9:_-]{8,120}$/.test(rawClientId)) return `client:${rawClientId}`;
+  if (session?.wallet) return `wallet:${session.wallet}`;
+  return `socket:${socket.id}`;
+}
+
+function emitOnlinePlayersIfChanged() {
+  const nextOnlinePlayers = onlinePresence.size;
+  if (nextOnlinePlayers === onlinePlayers) return;
+  onlinePlayers = nextOnlinePlayers;
+  io.emit("players:online", { onlinePlayers });
+}
+
+function markPresenceOnline(key) {
+  let entry = onlinePresence.get(key);
+  if (!entry) {
+    entry = { count: 0, timer: null };
+    onlinePresence.set(key, entry);
+  }
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+  }
+  entry.count += 1;
+  emitOnlinePlayersIfChanged();
+}
+
+function markPresenceOffline(key) {
+  const entry = onlinePresence.get(key);
+  if (!entry) return;
+  entry.count = Math.max(0, entry.count - 1);
+  if (entry.count > 0 || entry.timer) return;
+  entry.timer = setTimeout(() => {
+    const latest = onlinePresence.get(key);
+    if (!latest || latest.count > 0) return;
+    onlinePresence.delete(key);
+    emitOnlinePlayersIfChanged();
+  }, ONLINE_PRESENCE_GRACE_MS);
+}
+
 const START_HP = 1000;
 const MAX_HP = 100000;
 const SUPERPOWER_ATTACK_MULTIPLIER = 1.5;
@@ -2202,14 +2246,15 @@ app.post("/api/admin/round/start", adminRequired, (req,res) => {
 });
 
 io.on("connection", socket=>{
-  onlinePlayers++;
   const session = socketSession(socket);
+  const presenceKey = socketPresenceKey(socket, session);
+  socket.data.presenceKey = presenceKey;
+  markPresenceOnline(presenceKey);
   if (session) {
     socket.data.wallet = session.wallet;
     socket.data.allianceId = session.allianceId;
     if (session.allianceId) socket.join(allianceRoomId(session.allianceId));
   }
-  io.emit("players:online", { onlinePlayers });
   socket.emit("war:state", state());
 
   socket.on("heartbeat", ()=>{
@@ -2217,8 +2262,7 @@ io.on("connection", socket=>{
   });
 
   socket.on("disconnect", ()=>{
-    onlinePlayers = Math.max(0, onlinePlayers - 1);
-    io.emit("players:online", { onlinePlayers });
+    markPresenceOffline(socket.data.presenceKey);
   });
 });
 

@@ -70,6 +70,34 @@ const BACKEND_BUILD_ID = process.env.RAILWAY_GIT_COMMIT_SHA
   || process.env.COMMIT_SHA
   || "local";
 let lastServerError = null;
+const recentServerErrors = [];
+const failedPurchaseAttempts = [];
+
+function rememberServerError(err, code = "SERVER_ERROR") {
+  const item = {
+    at: Date.now(),
+    code: (err && err.code) || code,
+    message: String((err && err.message) || err || "Unknown error").slice(0, 240)
+  };
+  lastServerError = item;
+  recentServerErrors.unshift(item);
+  if (recentServerErrors.length > 12) recentServerErrors.length = 12;
+  return item;
+}
+
+function rememberFailedPurchase(input = {}, err = null) {
+  const item = {
+    at: Date.now(),
+    wallet: String(input.wallet || "").toLowerCase(),
+    pack: Number(input.pack || 0),
+    txHash: String(input.txHash || ""),
+    code: (err && err.code) || "BUY_FAILED",
+    message: String((err && err.message) || "Satın alma doğrulanamadı").slice(0, 220)
+  };
+  failedPurchaseAttempts.unshift(item);
+  if (failedPurchaseAttempts.length > 12) failedPurchaseAttempts.length = 12;
+  return item;
+}
 
 function isLoopbackOrigin(origin) {
   try {
@@ -352,6 +380,7 @@ let roundStartTime = Date.now();
 let roundEndTime = roundStartTime + ROUND_DURATION_MS;
 let roundStatus = 'active'; // active | ended | claiming
 let lastRoundResult = null;  // { roundNumber, winners:[{rank,country,share,topPlayer}], endedAt, totalPool }
+let seasonHistory = [];
 
 function timeRemainingMs() {
   return Math.max(0, roundEndTime - Date.now());
@@ -406,6 +435,39 @@ function persistRoundState() {
   db.saveGameState('round', { roundNumber, roundStatus, roundStartTime, roundEndTime, lastRoundResult });
 }
 
+function publicSeasonHistory() {
+  return seasonHistory.slice(0, 20);
+}
+
+function persistSeasonHistory() {
+  db.saveGameState('season_history', publicSeasonHistory());
+}
+
+function rememberRoundHistory(result) {
+  if (!result) return;
+  const economy = economyState();
+  const winners = (Array.isArray(result.winners) ? result.winners : []).slice(0, 3);
+  const payoutCount = Array.isArray(result.payouts) ? result.payouts.length : 0;
+  const item = {
+    roundNumber: result.roundNumber || roundNumber,
+    endedAt: result.endedAt || Date.now(),
+    rewardPoolEth: economy.rewardPoolEth || "0",
+    payoutCount,
+    payoutStatus: payoutCount >= Math.max(1, winners.length) ? "paid" : payoutCount ? "partial" : "awaiting_admin",
+    winners: winners.map(w => ({
+      rank: w.rank,
+      country: w.country,
+      countryName: w.countryName,
+      flag: w.flag,
+      sharePct: w.sharePct,
+      topPlayer: w.topPlayer || null,
+      topPlayerContribution: w.topPlayerContribution || 0
+    }))
+  };
+  seasonHistory = [item, ...seasonHistory.filter(x => Number(x.roundNumber) !== Number(item.roundNumber))].slice(0, 20);
+  persistSeasonHistory();
+}
+
 // İttifakı DB'ye kaydet — members Set'ini array'e çevirir (DB JSON array bekler)
 function persistAlliance(a) {
   if (!a) return;
@@ -431,6 +493,7 @@ function endRound() {
     note: 'Ödüller admin onayı bekliyor (smart contract payReward).'
   };
   io.emit('round:ended', lastRoundResult);
+  rememberRoundHistory(lastRoundResult);
   persistRoundState();
   try {
     const economy = economyState();
@@ -1236,7 +1299,8 @@ async function adminBackupSnapshot() {
       roundStartTime,
       roundEndTime,
       lastRoundResult
-    }
+    },
+    season_history: publicSeasonHistory()
   };
   return {
     ok: true,
@@ -1260,6 +1324,7 @@ async function adminBackupSnapshot() {
     allianceFeed,
     gifted_wallets: [...giftedWallets],
     giftedWallets: [...giftedWallets],
+    seasonHistory: publicSeasonHistory(),
     purchases,
     feedback: feedbackItems.map(feedbackPublicItem),
     rankNft: rankNftPublicState()
@@ -1283,6 +1348,7 @@ function rewardStatus() {
       remainingMs: timeRemainingMs(),
       lastResult: lastRoundResult
     },
+    history: publicSeasonHistory(),
     rules: {
       durationDays: 7,
       winnerSharesPct: [60, 25, 15],
@@ -1329,6 +1395,7 @@ function addAllianceFeed(type, message, payload={}) {
 app.get("/", (_req,res)=>res.json({ ok:true, name:"Centradar Tactical Gridwar Backend" }));
 app.get("/api/status", (_req,res)=>res.json(publicStatus()));
 app.get("/api/reward/status", (_req,res)=>res.json(rewardStatus()));
+app.get("/api/round/history", (_req,res)=>res.json({ ok:true, history:publicSeasonHistory() }));
 app.get("/health", (_req,res)=>res.json({
   ok:true,
   realtime:true,
@@ -1838,6 +1905,7 @@ app.post("/api/market/buy", authRequired, rateLimited, async (req,res)=>{
     emitState();
     res.json({ ok:true, player, added:purchase.bullets, txHash:purchase.txHash, blockNumber:purchase.blockNumber });
   } catch (e) {
+    rememberFailedPurchase({ wallet:req.wallet, pack:req.body?.pack, txHash:req.body?.txHash }, e);
     const status = e.status || 500;
     res.status(status).json({ code:e.code || "BUY_FAILED", error:e.message || "Satin alma dogrulanamadi" });
   }
@@ -2230,11 +2298,7 @@ app.get("/api/admin/health", adminRequired, async (_req,res) => {
       : memoryPurchaseList.slice(0, 1);
     latestPurchase = recent && recent[0] ? purchasePublicItem(recent[0]) : null;
   } catch (e) {
-    lastServerError = {
-      at: Date.now(),
-      code: "ADMIN_HEALTH_PURCHASE_LOOKUP",
-      message: e.message || "Son satın alma okunamadı"
-    };
+    rememberServerError(e, "ADMIN_HEALTH_PURCHASE_LOOKUP");
   }
 
   res.json({
@@ -2265,6 +2329,8 @@ app.get("/api/admin/health", adminRequired, async (_req,res) => {
     },
     lastPurchase: latestPurchase,
     lastError: lastServerError,
+    recentErrors: recentServerErrors.slice(0, 10),
+    failedPurchases: failedPurchaseAttempts.slice(0, 10),
     frontend: {
       expectedDomain: "https://centradar.xyz",
       apiDomain: "https://abswar-clean-backend-production.up.railway.app"
@@ -2420,6 +2486,7 @@ app.post("/api/admin/round/payout-log", adminRequired, (req,res) => {
   payouts.push(payout);
   payouts.sort((a,b)=>a.rank-b.rank);
   lastRoundResult.payouts = payouts;
+  rememberRoundHistory(lastRoundResult);
   persistRoundState();
   res.json({ ok:true, payout, payouts });
 });
@@ -2468,11 +2535,7 @@ process.on("SIGTERM", ()=>{
 // ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──
 app.use((err, _req, res, _next) => {
   console.error("[SERVER_ERROR]", err && (err.stack || err.message || err));
-  lastServerError = {
-    at: Date.now(),
-    code: err && err.code || "SERVER_ERROR",
-    message: String(err && err.message || err || "Unknown error").slice(0, 240)
-  };
+  rememberServerError(err, "SERVER_ERROR");
   try {
     const stackLines = String(err && err.stack || "").split("\n").slice(0, 3);
     sendDiscordAlert("🔥 SERVER_ERROR", [
@@ -2540,6 +2603,9 @@ async function bootstrap() {
       if (r.roundStartTime) roundStartTime = r.roundStartTime;
       if (r.roundEndTime) roundEndTime = r.roundEndTime;
       if (r.lastRoundResult !== undefined) lastRoundResult = r.lastRoundResult;
+    }
+    if (Array.isArray(gs.season_history)) {
+      seasonHistory = gs.season_history.slice(0, 20);
     }
   }
 

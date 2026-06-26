@@ -154,6 +154,8 @@ export async function initSchema() {
         wallet     TEXT,
         rank_index INTEGER,
         deadline   BIGINT,
+        cost_bullets INTEGER DEFAULT 0,
+        created_at BIGINT,
         PRIMARY KEY (wallet, rank_index)
       );
 
@@ -172,6 +174,8 @@ export async function initSchema() {
     await pool.query(`ALTER TABLE players ALTER COLUMN bullets SET DEFAULT 0;`);
     await pool.query(`ALTER TABLE alliances ADD COLUMN IF NOT EXISTS country_code TEXT;`);
     await pool.query(`ALTER TABLE countries ADD COLUMN IF NOT EXISTS is_superpower BOOLEAN DEFAULT FALSE;`);
+    await pool.query(`ALTER TABLE rank_claims ADD COLUMN IF NOT EXISTS cost_bullets INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE rank_claims ADD COLUMN IF NOT EXISTS created_at BIGINT;`);
 
     // Son saldırılar tablosu (radar + haber ticker için kalıcılık)
     await pool.query(`
@@ -525,11 +529,13 @@ export async function loadRecentBulletGrants(limit = 50) {
   }
 }
 
-export async function saveRankClaim({ wallet, rankIndex, deadline }) {
+export async function saveRankClaim({ wallet, rankIndex, deadline, costBullets = 0 }) {
   const item = {
     wallet: String(wallet || "").toLowerCase(),
     rankIndex: Number(rankIndex),
-    deadline: Number(deadline)
+    deadline: Number(deadline),
+    costBullets: Math.max(0, Number(costBullets) || 0),
+    createdAt: Date.now()
   };
   if (!item.wallet || !Number.isInteger(item.rankIndex) || !Number.isFinite(item.deadline)) return false;
   if (!HAS_DB) {
@@ -538,10 +544,10 @@ export async function saveRankClaim({ wallet, rankIndex, deadline }) {
   }
   try {
     await pool.query(
-      `INSERT INTO rank_claims (wallet, rank_index, deadline)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (wallet, rank_index) DO UPDATE SET deadline=$3`,
-      [item.wallet, item.rankIndex, item.deadline]
+      `INSERT INTO rank_claims (wallet, rank_index, deadline, cost_bullets, created_at)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (wallet, rank_index) DO UPDATE SET deadline=$3, cost_bullets=$4, created_at=$5`,
+      [item.wallet, item.rankIndex, item.deadline, item.costBullets, item.createdAt]
     );
     return true;
   } catch (e) {
@@ -557,7 +563,7 @@ export async function getRankClaim(wallet, rankIndex) {
   if (!HAS_DB) return rankClaimFallback.get(rankClaimKey(safeWallet, safeRank)) || null;
   try {
     const r = await pool.query(
-      `SELECT wallet, rank_index AS "rankIndex", deadline
+      `SELECT wallet, rank_index AS "rankIndex", deadline, cost_bullets AS "costBullets", created_at AS "createdAt"
        FROM rank_claims
        WHERE wallet=$1 AND rank_index=$2
        LIMIT 1`,
@@ -567,7 +573,9 @@ export async function getRankClaim(wallet, rankIndex) {
     return {
       wallet: r.rows[0].wallet,
       rankIndex: Number(r.rows[0].rankIndex),
-      deadline: Number(r.rows[0].deadline)
+      deadline: Number(r.rows[0].deadline),
+      costBullets: Number(r.rows[0].costBullets || 0),
+      createdAt: Number(r.rows[0].createdAt || 0)
     };
   } catch (e) {
     console.error("[DB] getRankClaim:", e.message);

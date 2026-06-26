@@ -911,13 +911,22 @@ function economyState() {
   const recordedRewardPoolWei = (recordedTotalWei * 70n) / 100n;
   const rewardPoolWei = onchainRewardPoolWei > recordedRewardPoolWei ? onchainRewardPoolWei : recordedRewardPoolWei;
   const totalWei = recordedTotalWei > 0n ? recordedTotalWei : (rewardPoolWei * 100n) / 70n;
+  const rewardPoolSource = onchainRewardPoolWei > recordedRewardPoolWei ? "onchain" : "recorded";
   return {
     purchaseCount: purchaseTotals.purchaseCount,
     totalBullets: purchaseTotals.totalBullets,
     totalWei: totalWei.toString(),
     totalEth: ethers.formatEther(totalWei),
+    recordedTotalWei: recordedTotalWei.toString(),
+    recordedTotalEth: ethers.formatEther(recordedTotalWei),
+    recordedRewardPoolWei: recordedRewardPoolWei.toString(),
+    recordedRewardPoolEth: ethers.formatEther(recordedRewardPoolWei),
+    onchainRewardPoolWei: onchainRewardPoolWei.toString(),
+    onchainRewardPoolEth: ethers.formatEther(onchainRewardPoolWei),
     rewardPoolWei: rewardPoolWei.toString(),
-    rewardPoolEth: ethers.formatEther(rewardPoolWei)
+    rewardPoolEth: ethers.formatEther(rewardPoolWei),
+    rewardPoolSource,
+    ammoAccountingNote: "Contract AmmoPurchased.amount temel 0.001 ETH birimini gosterir; oyun mermi paket bonuslari backend tarafinda tx tutarina gore dogrulanir."
   };
 }
 
@@ -1111,7 +1120,10 @@ function getPlayer(wallet) {
 
 // --- RANK NFT CLAIMS ---
 const RANK_NFT_MAINNET_CONTRACT_ADDRESS = "0xB58581518367607fe730c33b23df2bc0A8ae1113";
-const RANK_NFT_CONTRACT_ADDRESS = RANK_NFT_MAINNET_CONTRACT_ADDRESS;
+const RANK_NFT_CONTRACT_ADDRESS =
+  process.env.RANK_NFT_CONTRACT_ADDRESS ||
+  process.env.ABSWAR_RANK_NFT_CONTRACT_ADDRESS ||
+  RANK_NFT_MAINNET_CONTRACT_ADDRESS;
 const RANK_NFT_SIGNER_PRIVATE_KEY = process.env.RANK_NFT_SIGNER_PRIVATE_KEY || process.env.SIGNER_PRIVATE_KEY || "";
 const RANK_NFT_CLAIM_TTL_MS = Number(process.env.RANK_NFT_CLAIM_TTL_MS || 10 * 60 * 1000);
 const rankNftInterface = new ethers.Interface([
@@ -1629,6 +1641,16 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
         player
       });
     }
+    if (savedClaim) {
+      const recordedCost = Math.max(0, Number(savedClaim.costBullets || 0));
+      const fallbackCost = Math.max(0, Number(RANK_NFT_COSTS[rankIndex] || 0));
+      const refundBullets = recordedCost || fallbackCost;
+      await db.deleteRankClaim(wallet, rankIndex);
+      if (refundBullets > 0) {
+        player.bullets = Math.min(MAX_PLAYER_BULLETS, Number(player.bullets || 0) + refundBullets);
+        db.savePlayer(player);
+      }
+    }
 
     const cost = RANK_NFT_COSTS[rankIndex] || 0;
     if (player.bullets < cost) {
@@ -1643,7 +1665,7 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
     player.bullets -= cost;
     db.savePlayer(player);
     const claim = await createRankNftSignature(wallet, rankIndex);
-    const claimSaved = await db.saveRankClaim({ wallet, rankIndex, deadline:claim.deadline });
+    const claimSaved = await db.saveRankClaim({ wallet, rankIndex, deadline:claim.deadline, costBullets:cost });
     if (!claimSaved) {
       player.bullets += cost;
       db.savePlayer(player);

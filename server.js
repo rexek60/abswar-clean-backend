@@ -2129,7 +2129,7 @@ app.get("/api/admin/health", adminRequired, async (_req,res) => {
     lastError: lastServerError,
     frontend: {
       expectedDomain: "https://centradar.xyz",
-      apiDomain: "https://api.centradar.xyz"
+      apiDomain: "https://abswar-clean-backend-production.up.railway.app"
     }
   });
 });

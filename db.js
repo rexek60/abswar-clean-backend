@@ -422,6 +422,34 @@ export async function loadRecentPurchases(limit = 50) {
   }
 }
 
+export async function loadWalletPurchases(wallet, limit = 25) {
+  if (!HAS_DB) return [];
+  const safeWallet = String(wallet || "").toLowerCase();
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 25));
+  if (!safeWallet) return [];
+  try {
+    const r = await pool.query(`
+      SELECT
+        tx_hash AS "txHash",
+        wallet,
+        pack,
+        bullets,
+        value_wei AS "valueWei",
+        chain_id AS "chainId",
+        block_number AS "blockNumber",
+        created_at AS "createdAt"
+      FROM purchases
+      WHERE wallet=$1
+      ORDER BY created_at DESC
+      LIMIT $2
+    `, [safeWallet, safeLimit]);
+    return r.rows;
+  } catch (e) {
+    console.error("[DB] loadWalletPurchases:", e.message);
+    return [];
+  }
+}
+
 export async function loadAllPurchases() {
   if (!HAS_DB) return [];
   try {
@@ -525,6 +553,35 @@ export async function loadRecentBulletGrants(limit = 50) {
     }));
   } catch (e) {
     console.error("[DB] loadRecentBulletGrants:", e.message);
+    return [];
+  }
+}
+
+export async function loadWalletBulletGrants(wallet, limit = 25) {
+  if (!HAS_DB) return [];
+  const safeWallet = String(wallet || "").toLowerCase();
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 25));
+  if (!safeWallet) return [];
+  try {
+    const r = await pool.query(`
+      SELECT
+        wallet,
+        bullets,
+        reason,
+        admin_wallet AS "adminWallet",
+        created_at AS "createdAt"
+      FROM admin_bullet_grants
+      WHERE wallet=$1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2
+    `, [safeWallet, safeLimit]);
+    return r.rows.map(row => ({
+      ...row,
+      bullets: Number(row.bullets) || 0,
+      createdAt: Number(row.createdAt) || 0
+    }));
+  } catch (e) {
+    console.error("[DB] loadWalletBulletGrants:", e.message);
     return [];
   }
 }

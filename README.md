@@ -5,6 +5,7 @@ Mainnet notlari:
 - `ALLOW_DEMO_PURCHASES` eski uyumluluk adidir; mainnet'te false birakilmalidir.
 - `ADMIN_TOKEN`, `AUTH_SECRET`, `ABSWAR_CONTRACT_ADDRESS` ve Rank NFT secretlari Railway degiskenlerinde tutulmalidir.
 - `RANK_NFT_CONTRACT_ADDRESS` yeni rozet kontratini gostermelidir.
+- Bagimsiz denetim hazirlik notlari icin `AUDIT_READINESS.md` dosyasini kullan.
 
 ## FELAKET KURTARMA
 

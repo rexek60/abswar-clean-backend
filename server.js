@@ -1765,6 +1765,40 @@ app.post("/api/player/connect", authRequired, rateLimited, (req,res)=>{
   res.json({ ok:true, player, gift, giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size) });
 });
 
+app.get("/api/player/history", authRequired, async (req,res) => {
+  const wallet = req.wallet;
+  const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
+  const player = getPlayer(wallet);
+  let purchases = [];
+  let grants = [];
+
+  if (db.dbEnabled) {
+    [purchases, grants] = await Promise.all([
+      db.loadWalletPurchases(wallet, limit),
+      db.loadWalletBulletGrants(wallet, limit)
+    ]);
+  } else {
+    purchases = memoryPurchaseList.filter(p => normalizeWallet(p.wallet) === wallet).slice(0, limit);
+    grants = memoryBulletGrants.filter(g => normalizeWallet(g.wallet) === wallet).slice(0, limit);
+  }
+
+  res.json({
+    ok: true,
+    generatedAt: Date.now(),
+    wallet,
+    player,
+    purchases: purchases.map(purchasePublicItem),
+    grants: grants.map(bulletGrantPublicItem),
+    summary: {
+      purchaseCount: purchases.length,
+      grantCount: grants.length,
+      bullets: Number(player.bullets || 0),
+      contribution: Number(player.contribution || 0),
+      countryCode: player.country_code || null
+    }
+  });
+});
+
 app.get("/api/player/daily-quests", authRequired, async (req,res) => {
   const player = getPlayer(req.wallet);
   const entry = await loadDailyQuestEntry(player.wallet);
@@ -2355,7 +2389,7 @@ app.get("/api/admin/health", adminRequired, async (_req,res) => {
     failedPurchases: failedPurchaseAttempts.slice(0, 10),
     frontend: {
       expectedDomain: "https://centradar.xyz",
-      apiDomain: "https://abswar-clean-backend-production.up.railway.app"
+      apiDomain: "https://api.centradar.xyz"
     }
   });
 });

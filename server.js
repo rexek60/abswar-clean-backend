@@ -65,6 +65,11 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 8080;
 const SERVICE_STARTED_AT = Date.now();
+const BACKEND_BUILD_ID = process.env.RAILWAY_GIT_COMMIT_SHA
+  || process.env.GIT_COMMIT_SHA
+  || process.env.COMMIT_SHA
+  || "local";
+let lastServerError = null;
 
 function isLoopbackOrigin(origin) {
   try {
@@ -2079,6 +2084,56 @@ app.get("/api/admin/metrics", adminRequired, (_req,res) => {
   });
 });
 
+app.get("/api/admin/health", adminRequired, async (_req,res) => {
+  let latestPurchase = null;
+  try {
+    const recent = db.dbEnabled
+      ? await db.loadRecentPurchases(1)
+      : memoryPurchaseList.slice(0, 1);
+    latestPurchase = recent && recent[0] ? purchasePublicItem(recent[0]) : null;
+  } catch (e) {
+    lastServerError = {
+      at: Date.now(),
+      code: "ADMIN_HEALTH_PURCHASE_LOOKUP",
+      message: e.message || "Son satın alma okunamadı"
+    };
+  }
+
+  res.json({
+    ok: true,
+    generatedAt: Date.now(),
+    dbEnabled: db.dbEnabled,
+    backend: {
+      ok: true,
+      name: "Centradar Backend",
+      commit: BACKEND_BUILD_ID,
+      startedAt: SERVICE_STARTED_AT,
+      uptimeSec: Math.floor((Date.now() - SERVICE_STARTED_AT) / 1000),
+      network: NETWORK,
+      chainId: CHAIN.chainId,
+      api: "express-socketio"
+    },
+    socket: {
+      onlinePlayers,
+      presenceCount: onlinePresence.size,
+      engineClients: io.engine?.clientsCount || 0,
+      transports: ["polling", "websocket"]
+    },
+    economy: economyState(),
+    round: {
+      number: roundNumber,
+      status: roundStatus,
+      remainingMs: timeRemainingMs()
+    },
+    lastPurchase: latestPurchase,
+    lastError: lastServerError,
+    frontend: {
+      expectedDomain: "https://centradar.xyz",
+      apiDomain: "https://api.centradar.xyz"
+    }
+  });
+});
+
 app.get("/api/admin/purchases", adminRequired, async (req,res) => {
   const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
   let purchases = [];
@@ -2275,6 +2330,11 @@ process.on("SIGTERM", ()=>{
 // ── BAŞLANGIÇ: DB'yi kur, veriyi belleğe yükle, sonra sunucuyu başlat ──
 app.use((err, _req, res, _next) => {
   console.error("[SERVER_ERROR]", err && (err.stack || err.message || err));
+  lastServerError = {
+    at: Date.now(),
+    code: err && err.code || "SERVER_ERROR",
+    message: String(err && err.message || err || "Unknown error").slice(0, 240)
+  };
   try {
     const stackLines = String(err && err.stack || "").split("\n").slice(0, 3);
     sendDiscordAlert("🔥 SERVER_ERROR", [

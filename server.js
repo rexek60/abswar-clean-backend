@@ -939,7 +939,7 @@ function getPlayer(wallet) {
       resources: {       // 0-100 arası seviyeler
         oil:0,     // Petrol — %100'de +10 mermi
         metal:0,   // Metal — seviye×%1 hasar bonusu
-        uranium:0, // Uranyum — seviye×%1 kalkan
+        uranium:0, // Uranyum — üretildiyse +%10 kalkan
         energy:0   // Enerji — %100'de +50 HP
       },
       created_at:Date.now(),
@@ -1900,13 +1900,13 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   if (!player.resources) player.resources = { oil:0, metal:0, uranium:0, energy:0 };
   // Saldıran: Metal seviyesi×%1 ekstra hasar (max %10)
   const attackerMetal = Math.min(player.resources.metal||0, 10);
-  // Hedef ülkenin en katkılı oyuncusunun uranyumu kalkan olarak çalışır
+  // Hedef ülkenin en katkılı oyuncusunda uranyum varsa +%10 kalkan çalışır
   let defenderUranium = 0;
   const defenderTop = [...players.values()]
     .filter(p => p.country_code === target.code)
     .sort((a,b) => (b.contribution||0) - (a.contribution||0))[0];
   if (defenderTop && defenderTop.resources) {
-    defenderUranium = Math.min(defenderTop.resources.uranium||0, 10);
+    defenderUranium = Number(defenderTop.resources.uranium || 0) > 0 ? 10 : 0;
   }
 
   clampCountryHp(target);

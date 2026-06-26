@@ -615,10 +615,102 @@ const AMMO_PACKS = {
 const memoryPurchases = new Set();
 const memoryPurchaseList = [];
 const memoryBulletGrants = [];
+const memoryDailyQuests = new Map();
 const MAX_ADMIN_BULLET_GRANT = Math.max(1, Number(process.env.ADMIN_BULLET_GRANT_MAX || 100000));
 const MAX_PLAYER_BULLETS = 2147483647;
 let purchaseTotals = { purchaseCount:0, totalBullets:0, totalWei:"0" };
 let onchainRewardPoolWei = 0n;
+
+const DAILY_QUESTS = [
+  { id:"attack_10", label:"10 saldırı yap", field:"attacks", target:10, rewardBullets:25 },
+  { id:"resource_3", label:"3 kaynak üret", field:"resources", target:3, rewardBullets:15 },
+  { id:"contribution_25", label:"25 katkı kazan", field:"contribution", target:25, rewardBullets:30 },
+  { id:"alliance_ready", label:"İttifak kur veya katıl", field:"alliance", target:1, rewardBullets:20 }
+];
+
+function dailyDayKey(now=Date.now()) {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+function nextDailyResetAt(now=Date.now()) {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+
+function dailyMemoryKey(wallet, dayKey=dailyDayKey()) {
+  return `${String(wallet || "").toLowerCase()}:${dayKey}`;
+}
+
+function defaultDailyQuestEntry(wallet, dayKey=dailyDayKey()) {
+  return {
+    wallet:String(wallet || "").toLowerCase(),
+    dayKey,
+    progress:{ attacks:0, resources:0, contribution:0, alliance:0 },
+    claimed:{},
+    updatedAt:Date.now()
+  };
+}
+
+async function loadDailyQuestEntry(wallet, dayKey=dailyDayKey()) {
+  const safeWallet = normalizeWallet(wallet);
+  if (!safeWallet) return null;
+  const key = dailyMemoryKey(safeWallet, dayKey);
+  if (memoryDailyQuests.has(key)) return memoryDailyQuests.get(key);
+  const fromDb = await db.loadDailyQuest(safeWallet, dayKey);
+  const entry = fromDb || defaultDailyQuestEntry(safeWallet, dayKey);
+  entry.progress = { attacks:0, resources:0, contribution:0, alliance:0, ...(entry.progress || {}) };
+  entry.claimed = entry.claimed || {};
+  memoryDailyQuests.set(key, entry);
+  return entry;
+}
+
+async function saveDailyQuestEntry(entry) {
+  if (!entry) return false;
+  entry.updatedAt = Date.now();
+  memoryDailyQuests.set(dailyMemoryKey(entry.wallet, entry.dayKey), entry);
+  return db.saveDailyQuest(entry);
+}
+
+function publicDailyQuestStatus(entry, player) {
+  const progress = { attacks:0, resources:0, contribution:0, alliance:0, ...(entry?.progress || {}) };
+  if (player?.alliance_id) progress.alliance = 1;
+  const quests = DAILY_QUESTS.map(q => {
+    const current = Math.max(0, Number(progress[q.field] || 0));
+    const completed = current >= q.target;
+    const claimed = !!entry?.claimed?.[q.id];
+    return {
+      id:q.id,
+      label:q.label,
+      progress:Math.min(current, q.target),
+      target:q.target,
+      rewardBullets:q.rewardBullets,
+      completed,
+      claimed,
+      claimable:completed && !claimed
+    };
+  });
+  return {
+    ok:true,
+    dayKey:entry?.dayKey || dailyDayKey(),
+    resetsAt:nextDailyResetAt(),
+    quests,
+    completed:quests.filter(q => q.completed).length,
+    claimed:quests.filter(q => q.claimed).length,
+    rewardAvailable:quests.filter(q => q.claimable).reduce((sum,q)=>sum+q.rewardBullets,0)
+  };
+}
+
+async function recordDailyProgress(wallet, patch={}) {
+  const entry = await loadDailyQuestEntry(wallet);
+  if (!entry) return null;
+  entry.progress = { attacks:0, resources:0, contribution:0, alliance:0, ...(entry.progress || {}) };
+  for (const [field, amount] of Object.entries(patch || {})) {
+    if (!Object.prototype.hasOwnProperty.call(entry.progress, field)) continue;
+    entry.progress[field] = Math.max(0, Number(entry.progress[field] || 0) + Number(amount || 0));
+  }
+  await saveDailyQuestEntry(entry);
+  return entry;
+}
 
 function setPurchaseTotals(totals={}) {
   purchaseTotals = {
@@ -1584,6 +1676,48 @@ app.post("/api/player/connect", authRequired, rateLimited, (req,res)=>{
   res.json({ ok:true, player, gift, giftSlotsLeft: Math.max(0, GIFT_LIMIT - giftedWallets.size) });
 });
 
+app.get("/api/player/daily-quests", authRequired, async (req,res) => {
+  const player = getPlayer(req.wallet);
+  const entry = await loadDailyQuestEntry(player.wallet);
+  res.json(publicDailyQuestStatus(entry, player));
+});
+
+app.post("/api/player/daily-quests/claim", authRequired, rateLimited, async (req,res) => {
+  const player = getPlayer(req.wallet);
+  const questId = String(req.body && req.body.questId || "").trim();
+  const entry = await loadDailyQuestEntry(player.wallet);
+  const status = publicDailyQuestStatus(entry, player);
+  const quest = status.quests.find(q => q.id === questId);
+  if (!quest) return res.status(400).json({ code:"INVALID_DAILY_QUEST", error:"Gecersiz gunluk gorev" });
+  if (quest.claimed) return res.status(409).json({ code:"DAILY_QUEST_ALREADY_CLAIMED", error:"Bu gunluk odul zaten alindi", daily:status });
+  if (!quest.completed) return res.status(400).json({ code:"DAILY_QUEST_NOT_DONE", error:"Gunluk gorev henuz tamamlanmadi", daily:status });
+
+  const before = Number(player.bullets) || 0;
+  const after = Math.min(MAX_PLAYER_BULLETS, before + quest.rewardBullets);
+  const added = after - before;
+  if (added < 1) return res.status(400).json({ code:"PLAYER_BULLET_CAP", error:"Oyuncu mermi sinirinda", daily:status });
+
+  player.bullets = after;
+  entry.claimed = { ...(entry.claimed || {}), [quest.id]:true };
+  await saveDailyQuestEntry(entry);
+  db.savePlayer(player);
+
+  const grant = {
+    wallet:player.wallet,
+    bullets:added,
+    reason:`daily:${quest.id}`,
+    adminWallet:"system:daily",
+    createdAt:Date.now()
+  };
+  rememberBulletGrant(grant);
+  await db.recordBulletGrant(grant);
+
+  const daily = publicDailyQuestStatus(entry, player);
+  io.emit("admin:bullet-grant", bulletGrantPublicItem(grant));
+  emitState();
+  res.json({ ok:true, player, quest, added, daily });
+});
+
 app.post("/api/player/choose-country", authRequired, rateLimited, (req,res)=>{
   const wallet = req.body.wallet;
   const countryCode = String(req.body.countryCode || "").toUpperCase();
@@ -1654,6 +1788,7 @@ app.post("/api/player/produce-resource", authRequired, rateLimited, (req,res)=>{
 
   player.bullets -= 1;
   player.resources[which] = Math.min(100, (player.resources[which]||0) + 10);
+  recordDailyProgress(player.wallet, { resources:1 }).catch(e => console.warn("[DAILY] resource progress failed:", e.message));
 
   let bonus = null;
   // %100'e ulaştıysa ödülü ver ve sıfırla
@@ -1758,6 +1893,7 @@ app.post("/api/alliance/create", authRequired, rateLimited, (req,res)=>{
 
   alliances.set(id, alliance);
   player.alliance_id = id;
+  recordDailyProgress(player.wallet, { alliance:1 }).catch(e => console.warn("[DAILY] alliance progress failed:", e.message));
   persistAlliance(alliance);
   db.savePlayer(player);
 
@@ -1780,6 +1916,7 @@ app.post("/api/alliance/join", authRequired, rateLimited, (req,res)=>{
   if (alliance.members.size >= 50) return res.status(400).json({ code:"ALLIANCE_FULL", error:"İttifak dolu (maks 50 üye)" });
 
   player.alliance_id = allianceId;
+  recordDailyProgress(player.wallet, { alliance:1 }).catch(e => console.warn("[DAILY] alliance progress failed:", e.message));
   alliance.members.add(player.wallet);
   persistAlliance(alliance);
   db.savePlayer(player);
@@ -1930,6 +2067,7 @@ app.post("/api/game/attack", authRequired, rateLimited, (req,res)=>{
   const contribGain = 1 + rank.bonus; // %5-%30 arası ekstra puan
   player.contribution += contribGain;
   player.attacks += 1;
+  recordDailyProgress(player.wallet, { attacks:1, contribution:contribGain }).catch(e => console.warn("[DAILY] attack progress failed:", e.message));
 
   if (player.alliance_id && alliances.has(player.alliance_id)) {
     const alliance = alliances.get(player.alliance_id);

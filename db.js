@@ -67,8 +67,12 @@ if (HAS_DB) {
 export const dbEnabled = HAS_DB;
 
 const rankClaimFallback = new Map();
+const dailyQuestFallback = new Map();
 function rankClaimKey(wallet, rankIndex) {
   return `${String(wallet || "").toLowerCase()}:${Number(rankIndex)}`;
+}
+function dailyQuestKey(wallet, dayKey) {
+  return `${String(wallet || "").toLowerCase()}:${String(dayKey || "")}`;
 }
 
 // ── ŞEMA OLUŞTURMA ──
@@ -151,6 +155,15 @@ export async function initSchema() {
         rank_index INTEGER,
         deadline   BIGINT,
         PRIMARY KEY (wallet, rank_index)
+      );
+
+      CREATE TABLE IF NOT EXISTS daily_quests (
+        wallet     TEXT,
+        day_key    TEXT,
+        progress   JSONB DEFAULT '{}',
+        claimed    JSONB DEFAULT '{}',
+        updated_at BIGINT,
+        PRIMARY KEY (wallet, day_key)
       );
     `);
 
@@ -582,11 +595,68 @@ export async function deleteRankClaim(wallet, rankIndex) {
   }
 }
 
+export async function loadDailyQuest(wallet, dayKey) {
+  const safeWallet = String(wallet || "").toLowerCase();
+  const safeDay = String(dayKey || "");
+  if (!safeWallet || !safeDay) return null;
+  const key = dailyQuestKey(safeWallet, safeDay);
+  if (!HAS_DB) return dailyQuestFallback.get(key) || null;
+  try {
+    const r = await pool.query(
+      `SELECT wallet, day_key AS "dayKey", progress, claimed, updated_at AS "updatedAt"
+       FROM daily_quests
+       WHERE wallet=$1 AND day_key=$2
+       LIMIT 1`,
+      [safeWallet, safeDay]
+    );
+    if (!r.rows.length) return null;
+    return {
+      wallet: r.rows[0].wallet,
+      dayKey: r.rows[0].dayKey,
+      progress: r.rows[0].progress || {},
+      claimed: r.rows[0].claimed || {},
+      updatedAt: Number(r.rows[0].updatedAt) || Date.now()
+    };
+  } catch (e) {
+    console.error("[DB] loadDailyQuest:", e.message);
+    return null;
+  }
+}
+
+export async function saveDailyQuest(entry) {
+  if (!entry) return false;
+  const item = {
+    wallet: String(entry.wallet || "").toLowerCase(),
+    dayKey: String(entry.dayKey || ""),
+    progress: entry.progress || {},
+    claimed: entry.claimed || {},
+    updatedAt: Number(entry.updatedAt || Date.now())
+  };
+  if (!item.wallet || !item.dayKey) return false;
+  const key = dailyQuestKey(item.wallet, item.dayKey);
+  if (!HAS_DB) {
+    dailyQuestFallback.set(key, item);
+    return true;
+  }
+  try {
+    await pool.query(
+      `INSERT INTO daily_quests (wallet, day_key, progress, claimed, updated_at)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (wallet, day_key) DO UPDATE SET progress=$3, claimed=$4, updated_at=$5`,
+      [item.wallet, item.dayKey, JSON.stringify(item.progress), JSON.stringify(item.claimed), item.updatedAt]
+    );
+    return true;
+  } catch (e) {
+    console.error("[DB] saveDailyQuest:", e.message);
+    return false;
+  }
+}
+
 // Tam reset (admin)
 export async function wipeAll(options = {}) {
   if (!HAS_DB) return;
   try {
-    const tables = ["players", "alliances", "gifted_wallets", "recent_attacks"];
+    const tables = ["players", "alliances", "gifted_wallets", "recent_attacks", "daily_quests"];
     if (options && options.purchases) {
       tables.push("purchases", "admin_bullet_grants", "rank_claims");
     }

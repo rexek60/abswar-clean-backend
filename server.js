@@ -69,7 +69,7 @@ const BACKEND_BUILD_ID = process.env.RAILWAY_GIT_COMMIT_SHA
   || process.env.GIT_COMMIT_SHA
   || process.env.COMMIT_SHA
   || "local";
-const PUBLIC_API_URL = process.env.PUBLIC_API_URL || "https://abswar-clean-backend-production.up.railway.app";
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || "https://api.centradar.xyz";
 let lastServerError = null;
 const recentServerErrors = [];
 const failedPurchaseAttempts = [];

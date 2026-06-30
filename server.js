@@ -69,6 +69,7 @@ const BACKEND_BUILD_ID = process.env.RAILWAY_GIT_COMMIT_SHA
   || process.env.GIT_COMMIT_SHA
   || process.env.COMMIT_SHA
   || "local";
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || "https://abswar-clean-backend-production.up.railway.app";
 let lastServerError = null;
 const recentServerErrors = [];
 const failedPurchaseAttempts = [];
@@ -2389,7 +2390,7 @@ app.get("/api/admin/health", adminRequired, async (_req,res) => {
     failedPurchases: failedPurchaseAttempts.slice(0, 10),
     frontend: {
       expectedDomain: "https://centradar.xyz",
-      apiDomain: "https://api.centradar.xyz"
+      apiDomain: PUBLIC_API_URL
     }
   });
 });

@@ -624,11 +624,11 @@ function authRequired(req, res, next) {
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const session = verifySessionToken(token);
   if (!session) {
-    return res.status(401).json({ code:"AUTH_REQUIRED", error:"Cuzdan imzasi gerekli" });
+    return res.status(401).json({ code:"AUTH_REQUIRED", error:"Cüzdan imzası gerekli" });
   }
   const bodyWallet = normalizeWallet(req.body && req.body.wallet);
   if (bodyWallet && bodyWallet !== session.wallet) {
-    return res.status(403).json({ code:"WALLET_MISMATCH", error:"Oturum cuzdanla eslesmiyor" });
+    return res.status(403).json({ code:"WALLET_MISMATCH", error:"Oturum cüzdanla eşleşmiyor" });
   }
   req.wallet = session.wallet;
   if (req.body) req.body.wallet = session.wallet;
@@ -985,17 +985,17 @@ async function verifyWalletMessage(wallet, message, signature, signerWallet=null
 
 async function verifyAmmoPurchase({ wallet, pack, txHash }) {
   const cfg = AMMO_PACKS[pack];
-  if (!cfg) throw apiError("INVALID_PACK", "Gecersiz paket");
+  if (!cfg) throw apiError("INVALID_PACK", "Geçersiz paket");
   if (!ethers.isAddress(ABSWAR_CONTRACT_ADDRESS)) {
-    throw apiError("CONTRACT_NOT_CONFIGURED", "Kontrat adresi ayarli degil", 503);
+    throw apiError("CONTRACT_NOT_CONFIGURED", "Kontrat adresi ayarlı değil", 503);
   }
   if (!ethers.isHexString(txHash, 32)) {
-    throw apiError("INVALID_TX_HASH", "Gecersiz islem hash'i");
+    throw apiError("INVALID_TX_HASH", "Geçersiz işlem hash'i");
   }
 
   const network = await provider.getNetwork();
   if (Number(network.chainId) !== CHAIN.chainId) {
-    throw apiError("WRONG_RPC_CHAIN", "RPC zinciri beklenen Abstract agi degil", 503);
+    throw apiError("WRONG_RPC_CHAIN", "RPC zinciri beklenen Abstract ağı değil", 503);
   }
 
   const [receipt, tx] = await Promise.all([
@@ -1003,16 +1003,16 @@ async function verifyAmmoPurchase({ wallet, pack, txHash }) {
     provider.getTransaction(txHash)
   ]);
   if (!receipt || !tx) throw apiError("TX_PENDING", "Islem henuz onaylanmadi", 202);
-  if (receipt.status !== 1) throw apiError("TX_FAILED", "Blockchain islemi basarisiz");
-  if (normalizeWallet(tx.from) !== wallet) throw apiError("TX_FROM_MISMATCH", "Islem farkli cuzdan tarafindan gonderildi");
+  if (receipt.status !== 1) throw apiError("TX_FAILED", "Blockchain işlemi başarısız");
+  if (normalizeWallet(tx.from) !== wallet) throw apiError("TX_FROM_MISMATCH", "İşlem farklı cüzdan tarafından gönderildi");
   if (normalizeWallet(tx.to) !== normalizeWallet(ABSWAR_CONTRACT_ADDRESS)) {
     throw apiError("TX_TO_MISMATCH", "Islem Centradar kontratina gitmiyor");
   }
   if (String(tx.data || "").toLowerCase() !== BUY_AMMO_SELECTOR) {
-    throw apiError("TX_METHOD_MISMATCH", "Islem buyAmmo() cagrisi degil");
+    throw apiError("TX_METHOD_MISMATCH", "İşlem buyAmmo() çağrısı değil");
   }
   if (tx.value !== cfg.valueWei) {
-    throw apiError("TX_VALUE_MISMATCH", "Islem tutari secilen paketle eslesmiyor");
+    throw apiError("TX_VALUE_MISMATCH", "İşlem tutarı seçilen paketle eşleşmiyor");
   }
 
   const contractAddress = normalizeWallet(ABSWAR_CONTRACT_ADDRESS);
@@ -1025,10 +1025,10 @@ async function verifyAmmoPurchase({ wallet, pack, txHash }) {
 
   if (!purchaseEvent) throw apiError("AMMO_EVENT_MISSING", "Kontrat satin alma eventi bulunamadi");
   if (normalizeWallet(purchaseEvent.args.buyer) !== wallet) {
-    throw apiError("AMMO_EVENT_BUYER_MISMATCH", "Kontrat eventi cuzdanla eslesmiyor");
+    throw apiError("AMMO_EVENT_BUYER_MISMATCH", "Kontrat eventi cüzdanla eşleşmiyor");
   }
   if (purchaseEvent.args.ethPaid !== cfg.valueWei) {
-    throw apiError("AMMO_EVENT_VALUE_MISMATCH", "Kontrat eventi paket tutariyla eslesmiyor");
+    throw apiError("AMMO_EVENT_VALUE_MISMATCH", "Kontrat eventi paket tutarıyla eşleşmiyor");
   }
 
   return {
@@ -1049,7 +1049,7 @@ async function recordPurchaseOnce(purchase) {
     const inserted = await db.recordPurchase(purchase);
     if (!inserted) return false;
   } else if (IS_MAINNET) {
-    throw apiError("DB_REQUIRED", "Mainnet odeme kaydi icin PostgreSQL gerekli", 503);
+    throw apiError("DB_REQUIRED", "Mainnet ödeme kaydı için PostgreSQL gerekli", 503);
   }
   memoryPurchases.add(purchase.txHash);
   addPurchaseToTotals(purchase);
@@ -1093,7 +1093,7 @@ function rateLimited(req, res, next) {
 
 function getPlayer(wallet) {
   const id = normalizeWallet(wallet);
-  if (!id) throw apiError("INVALID_WALLET", "Gecersiz cuzdan");
+  if (!id) throw apiError("INVALID_WALLET", "Geçersiz cüzdan");
   if (!players.has(id)) {
     players.set(id, {
       wallet:id,
@@ -1545,7 +1545,7 @@ app.post("/api/feedback", rateLimited, async (req,res,next)=>{
 
 app.post("/api/auth/challenge", rateLimited, (req,res)=>{
   const wallet = normalizeWallet(req.body && req.body.wallet);
-  if (!wallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+  if (!wallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   const nonce = randomBytes(16).toString("hex");
   const expiresAt = Date.now() + CHALLENGE_TTL_MS;
   const message = makeChallengeMessage(wallet, nonce, expiresAt);
@@ -1564,14 +1564,14 @@ app.post("/api/auth/verify", rateLimited, async (req,res)=>{
   const challenge = authChallenges.get(wallet);
   if (!challenge || challenge.expiresAt < Date.now()) {
     authChallenges.delete(wallet);
-    return res.status(401).json({ code:"CHALLENGE_EXPIRED", error:"Giris imzasi suresi doldu" });
+    return res.status(401).json({ code:"CHALLENGE_EXPIRED", error:"Giriş imzası süresi doldu" });
   }
   if (message !== challenge.message) {
-    return res.status(401).json({ code:"CHALLENGE_MISMATCH", error:"Giris mesaji eslesmiyor" });
+    return res.status(401).json({ code:"CHALLENGE_MISMATCH", error:"Giriş mesajı eşleşmiyor" });
   }
   try {
     if (!await verifyWalletMessage(wallet, message, signature, signerWallet)) {
-      return res.status(401).json({ code:"SIGNATURE_MISMATCH", error:"Imza cuzdanla eslesmiyor" });
+      return res.status(401).json({ code:"SIGNATURE_MISMATCH", error:"İmza cüzdanla eşleşmiyor" });
     }
     authChallenges.delete(wallet);
     const session = issueSessionToken(wallet);
@@ -1598,7 +1598,7 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
     const wallet = req.wallet;
     const rankIndex = Number(req.body && req.body.rank);
     if (!Number.isInteger(rankIndex) || rankIndex < 0 || rankIndex >= RANKS.length) {
-      return res.status(400).json({ code:"INVALID_RANK", error:"Gecersiz rutbe" });
+      return res.status(400).json({ code:"INVALID_RANK", error:"Geçersiz rütbe" });
     }
 
     const player = getPlayer(wallet);
@@ -1669,7 +1669,7 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
     if (!claimSaved) {
       player.bullets += cost;
       db.savePlayer(player);
-      return res.status(503).json({ code:"RANK_CLAIM_SAVE_FAILED", error:"Rozet imza kaydi tutulamadi" });
+      return res.status(503).json({ code:"RANK_CLAIM_SAVE_FAILED", error:"Rozet imza kaydı tutulamadı" });
     }
 
     res.json({
@@ -1687,7 +1687,7 @@ app.post("/api/nft/claim-signature", authRequired, rateLimited, async (req,res) 
       player
     });
   } catch (e) {
-    res.status(500).json({ code:"RANK_NFT_SIGNATURE_FAILED", error:e.message || "NFT imzasi uretilemedi" });
+    res.status(500).json({ code:"RANK_NFT_SIGNATURE_FAILED", error:e.message || "NFT imzası üretilemedi" });
   }
 });
 
@@ -1706,7 +1706,7 @@ app.post("/api/admin/nft/rank-grant", adminRequired, rateLimited, async (req,res
     if (adminWallet !== ADMIN_OWNER_WALLET || targetWallet !== ADMIN_OWNER_WALLET) {
       return res.status(403).json({
         code:"ADMIN_NFT_WALLET_ONLY",
-        error:"Admin rozet mint izni sadece bagli owner cuzdanina verilir"
+        error:"Admin rozet mint izni sadece bağlı owner cüzdanına verilir"
       });
     }
 
@@ -1736,7 +1736,7 @@ app.post("/api/admin/nft/rank-grant", adminRequired, rateLimited, async (req,res
       owned: claims.filter(c => c.status === "owned").length
     });
   } catch (e) {
-    res.status(500).json({ code:"ADMIN_RANK_NFT_GRANT_FAILED", error:e.message || "Admin NFT imzasi uretilemedi" });
+    res.status(500).json({ code:"ADMIN_RANK_NFT_GRANT_FAILED", error:e.message || "Admin NFT imzası üretilemedi" });
   }
 });
 
@@ -1811,8 +1811,8 @@ app.post("/api/player/daily-quests/claim", authRequired, rateLimited, async (req
   const entry = await loadDailyQuestEntry(player.wallet);
   const status = publicDailyQuestStatus(entry, player);
   const quest = status.quests.find(q => q.id === questId);
-  if (!quest) return res.status(400).json({ code:"INVALID_DAILY_QUEST", error:"Gecersiz gunluk gorev" });
-  if (quest.claimed) return res.status(409).json({ code:"DAILY_QUEST_ALREADY_CLAIMED", error:"Bu gunluk odul zaten alindi", daily:status });
+  if (!quest) return res.status(400).json({ code:"INVALID_DAILY_QUEST", error:"Geçersiz günlük görev" });
+  if (quest.claimed) return res.status(409).json({ code:"DAILY_QUEST_ALREADY_CLAIMED", error:"Bu günlük ödül zaten alındı", daily:status });
   if (!quest.completed) return res.status(400).json({ code:"DAILY_QUEST_NOT_DONE", error:"Gunluk gorev henuz tamamlanmadi", daily:status });
 
   const before = Number(player.bullets) || 0;
@@ -1950,7 +1950,7 @@ app.post("/api/market/buy", authRequired, rateLimited, async (req,res)=>{
     const purchase = await verifyAmmoPurchase({ wallet, pack, txHash });
     const inserted = await recordPurchaseOnce(purchase);
     if (!inserted) {
-      return res.status(409).json({ code:"TX_ALREADY_USED", error:"Bu blockchain islemi daha once kullanildi" });
+      return res.status(409).json({ code:"TX_ALREADY_USED", error:"Bu blockchain işlemi daha önce kullanıldı" });
     }
 
     const player = getPlayer(wallet);
@@ -2088,9 +2088,9 @@ app.post("/api/alliance/chat", authRequired, rateLimited, (req,res)=>{
   const player = getPlayer(req.wallet);
   const message = String(req.body.message || "").trim().slice(0, 200);
   if (!message) return res.status(400).json({ code:"MESSAGE_EMPTY", error:"Mesaj bos" });
-  if (!isCleanText(message)) return res.status(400).json({ code:"MESSAGE_INAPPROPRIATE", error:"Mesaj uygun degil" });
+  if (!isCleanText(message)) return res.status(400).json({ code:"MESSAGE_INAPPROPRIATE", error:"Mesaj uygun değil" });
   if (!player.alliance_id || !alliances.has(player.alliance_id)) {
-    return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"Ittifakta degilsin" });
+    return res.status(400).json({ code:"NOT_IN_ALLIANCE", error:"İttifakta değilsin" });
   }
 
   const now = Date.now();
@@ -2431,9 +2431,9 @@ app.post("/api/admin/bullets/grant", adminRequired, rateLimited, async (req,res)
   const requestedBullets = Math.trunc(Number(req.body && (req.body.bullets ?? req.body.amount)));
   const reason = String(req.body && req.body.reason || "").trim().slice(0, 120);
 
-  if (!targetWallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+  if (!targetWallet) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
   if (!Number.isSafeInteger(requestedBullets) || requestedBullets < 1) {
-    return res.status(400).json({ code:"INVALID_BULLET_AMOUNT", error:"Gecersiz mermi miktari" });
+    return res.status(400).json({ code:"INVALID_BULLET_AMOUNT", error:"Geçersiz mermi miktarı" });
   }
   if (requestedBullets > MAX_ADMIN_BULLET_GRANT) {
     return res.status(400).json({
@@ -2471,12 +2471,12 @@ app.post("/api/admin/bullets/grant", adminRequired, rateLimited, async (req,res)
 
 app.post("/api/admin/player/grant-bullets", adminRequired, rateLimited, async (req,res) => {
   const target = normalizeWallet(req.body && req.body.wallet);
-  if (!target) return res.status(400).json({ code:"INVALID_WALLET", error:"Gecersiz cuzdan" });
+  if (!target) return res.status(400).json({ code:"INVALID_WALLET", error:"Geçersiz cüzdan" });
 
   const amount = Math.trunc(Number(req.body && req.body.amount));
   const reason = String(req.body && req.body.reason || "").trim().slice(0, 120);
   if (!Number.isSafeInteger(amount) || amount < 1) {
-    return res.status(400).json({ code:"INVALID_AMOUNT", error:"Gecersiz mermi miktari" });
+    return res.status(400).json({ code:"INVALID_AMOUNT", error:"Geçersiz mermi miktarı" });
   }
   if (amount > MAX_ADMIN_BULLET_GRANT) {
     return res.status(400).json({
@@ -2523,14 +2523,14 @@ app.get("/api/admin/backup", adminRequired, async (_req,res,next) => {
 });
 
 app.post("/api/admin/round/payout-log", adminRequired, (req,res) => {
-  if (!lastRoundResult) return res.status(400).json({ code:"NO_ROUND_RESULT", error:"Kaydedilecek bitmis tur yok" });
+  if (!lastRoundResult) return res.status(400).json({ code:"NO_ROUND_RESULT", error:"Kaydedilecek bitmiş tur yok" });
   const rank = Number(req.body && req.body.rank);
   const txHash = String(req.body && req.body.txHash || "").trim();
   if (!Number.isInteger(rank) || rank < 1 || rank > 3) {
-    return res.status(400).json({ code:"INVALID_RANK", error:"Gecersiz odul sirasi" });
+    return res.status(400).json({ code:"INVALID_RANK", error:"Geçersiz ödül sırası" });
   }
   if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
-    return res.status(400).json({ code:"INVALID_TX_HASH", error:"Gecersiz islem hash'i" });
+    return res.status(400).json({ code:"INVALID_TX_HASH", error:"Geçersiz işlem hash'i" });
   }
   const payout = {
     rank,
@@ -2667,7 +2667,7 @@ async function bootstrap() {
 
   try {
     setPurchaseTotals(await db.loadPurchaseTotals());
-    console.log(`[DB] Satin alma ozeti: ${purchaseTotals.purchaseCount} islem, ${ethers.formatEther(purchaseTotals.totalWei)} ETH`);
+    console.log(`[DB] Satın alma özeti: ${purchaseTotals.purchaseCount} işlem, ${ethers.formatEther(purchaseTotals.totalWei)} ETH`);
   } catch(e) {
     console.error("[DB] Satin alma ozeti yuklenemedi:", e.message);
   }
